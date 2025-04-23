@@ -150,29 +150,76 @@ async def analyze_conversation_context(history: List[Dict[str, str]], user_query
 
     # Format messages for the prompt
     formatted_history = "\n".join([
-        f"{msg.get('role', 'unknown')}: {msg.get('content', '')[:100]}..."
+        f"{msg.get('role', 'unknown')}: {msg.get('content', '')[:200]}..."
         for msg in recent_messages
     ])
+
+    # Check if the last assistant message contains a KB file listing
+    kb_file_listing_detected = False
+    kb_meta_query_detected = False
+    last_assistant_msg = None
+
+    # Find the last assistant message
+    for i in range(len(recent_messages) - 1, -1, -1):
+        msg = recent_messages[i]
+        if msg.get('role') == 'assistant':
+            last_assistant_msg = msg.get('content', '')
+            break
+
+    # Check for KB file listing in the last assistant message
+    kb_list_markers = [
+        "# Knowledge Base Contents",
+        "The knowledge base contains",
+        "files in the knowledge base",
+        "documents in the knowledge base",
+        "# Files Available"
+    ]
+    last_msg_contains_kb_list = last_assistant_msg and any(marker in last_assistant_msg for marker in kb_list_markers)
+
+    # Check for KB meta-query in recent user messages
+    for i in range(len(recent_messages) - 1, -1, -1):
+        msg = recent_messages[i]
+        if msg.get('role') == 'user' and any(kw in msg.get('content', '').lower() for kw in ['what files', 'what documents', 'what\'s in the kb', 'knowledge base contents', 'list files', 'show files']):
+            kb_meta_query_detected = True
+            logger.info("Detected KB meta-query in recent conversation history")
+            break
+        if msg.get('role') == 'assistant' and any(kw in msg.get('content', '').lower() for kw in ['knowledge base contents', '# knowledge base', 'files in the knowledge base', 'documents in the knowledge base']):
+            kb_file_listing_detected = True
+            logger.info("Detected KB file listing in recent assistant message")
+            break
 
     prompt = f"""
     Analyze this conversation history and the new user query to determine:
     1. If the user is continuing a previous intent
-    2. If the user is referring to previous outputs
-    3. How the conversation context affects the likely intent
+    2. If the user is referring to specific items or content from previous messages (especially the LAST assistant message)
+    3. How the conversation context affects the likely true intent
 
-    Conversation History:
+    Conversation History (most recent last):
     {formatted_history}
 
     New User Query: "{user_query}"
 
+    {'IMPORTANT NOTE: The IMMEDIATELY PRECEDING ASSISTANT MESSAGE contained a list of Knowledge Base files.' if last_msg_contains_kb_list else ''}
+    {'IMPORTANT NOTE: The conversation history shows that the assistant recently provided a list of knowledge base files to the user.' if kb_file_listing_detected else ''}
+    {'IMPORTANT NOTE: The conversation history shows that the user recently asked about the contents of the knowledge base.' if kb_meta_query_detected else ''}
+
+    Is the New User Query making a follow-up question or statement specifically about the content, files, or items mentioned or listed in the IMMEDIATELY PRECEDING ASSISTANT MESSAGE? Rate this likelihood (0.0 to 1.0):
+    - refers_to_previous_assistant_output: [Score]
+
+    If the IMMEDIATELY PRECEDING ASSISTANT MESSAGE contained a list of Knowledge Base files, and the New User Query refers to "those" or "these files" or uses other pronouns like "they", "them", strongly consider a 'kb_query' intent bias, and strongly decrease the bias for 'temp_context_query' unless temporary files are explicitly mentioned in the new query.
+
+    Pay special attention to pronouns like "those", "these", "they", "them" in the user query that may refer to previously mentioned items, especially if they refer to knowledge base files that were just listed.
+
     Rate how the conversation history suggests each intent (0.0 to 1.0):
     - populate_template: User wants to fill a template
-    - analyze_template: User wants to analyze a template
-    - kb_query: User wants knowledge base information
-    - temp_context_query: User wants information from uploaded documents
+    - analyze_template: User wants to analyze a template (consider boosting if user asks to analyze KB files after listing)
+    - kb_query: User wants knowledge base information (consider boosting if user refers to listed KB files)
+    - temp_context_query: User wants information from uploaded documents (decrease score if user refers to listed KB files but no temp files)
     - kb_query_with_temp_context: User wants combined information
 
-    Provide your analysis as a JSON object with these intents as keys and scores as values.
+    Additionally, if the user query contains pronouns (like "those", "these", "they") that seem to refer to previously listed knowledge base files, add a field "kb_file_reference_score" with a value between 0.0 and 1.0 indicating how likely the user is referring to KB files.
+
+    Provide your analysis as a JSON object with these intents as keys and scores as values, plus the 'refers_to_previous_assistant_output' score.
     """
 
     try:
@@ -189,11 +236,22 @@ async def analyze_conversation_context(history: List[Dict[str, str]], user_query
 
         # Validate scores
         valid_scores = {}
-        for intent, score in bias_scores.items():
+        for key, score in bias_scores.items():
+            # Handle both intent scores and the special refers_to_previous_assistant_output score
             if isinstance(score, (int, float)) and 0 <= score <= 1:
-                valid_scores[intent] = float(score)
+                valid_scores[key] = float(score)
             else:
-                valid_scores[intent] = 0.0
+                # Default to 0.0 for invalid scores
+                valid_scores[key] = 0.0
+                logger.warning(f"Invalid score for {key}: {score}, defaulting to 0.0")
+
+        # Ensure we have a refers_to_previous_assistant_output score
+        if 'refers_to_previous_assistant_output' not in valid_scores:
+            # If not provided, default to 0.0
+            valid_scores['refers_to_previous_assistant_output'] = 0.0
+            logger.info("No refers_to_previous_assistant_output score provided, defaulting to 0.0")
+        else:
+            logger.info(f"refers_to_previous_assistant_output score: {valid_scores['refers_to_previous_assistant_output']}")
 
         return valid_scores
     except Exception as e:
@@ -204,7 +262,9 @@ async def analyze_conversation_context(history: List[Dict[str, str]], user_query
             "analyze_template": 0.0,
             "kb_query": 0.0,
             "temp_context_query": 0.0,
-            "kb_query_with_temp_context": 0.0
+            "kb_query_with_temp_context": 0.0,
+            "refers_to_previous_assistant_output": 0.0,
+            "kb_file_reference_score": 0.0
         }
 
 async def estimate_analyzer_confidence(analyzer_output: Any) -> float:
@@ -293,11 +353,77 @@ async def determine_final_intent(
             intent_scores["analyze_template"] += template_analysis["analyze_score"]
 
     # 3. Consider conversation history if available
+    kb_file_reference_detected = False
+    refers_to_previous_output = False
+    has_temp_files = bool(temp_files_info)
+
     if history:
         conversation_bias = await analyze_conversation_context(
             history, user_query, client, model
         )
         logger.info(f"Conversation context bias: {conversation_bias}")
+
+        # Extract special scores
+        refers_score = 0.0
+        kb_file_reference_score = 0.0
+
+        if 'refers_to_previous_assistant_output' in conversation_bias:
+            refers_score = conversation_bias.pop('refers_to_previous_assistant_output')
+            logger.info(f"Extracted refers_to_previous_assistant_output score: {refers_score:.4f}")
+
+        if 'kb_file_reference_score' in conversation_bias:
+            kb_file_reference_score = conversation_bias.pop('kb_file_reference_score')
+            logger.info(f"Extracted kb_file_reference_score: {kb_file_reference_score:.4f}")
+
+        # Check if the user is referring to previous assistant output
+        if refers_score > 0.7:  # High likelihood threshold
+            refers_to_previous_output = True
+            logger.info(f"High likelihood of referring to previous assistant output: {refers_score:.4f}")
+
+            # Check if the previous assistant message was a KB file list
+            last_assistant_msg = None
+            for msg in reversed(history):
+                if msg.get('role') == 'assistant':
+                    last_assistant_msg = msg.get('content', '')
+                    break
+
+            kb_list_markers = [
+                "# Knowledge Base Contents",
+                "The knowledge base contains",
+                "files in the knowledge base",
+                "documents in the knowledge base",
+                "# Files Available"
+            ]
+            kb_list_in_last_msg = last_assistant_msg and any(marker in last_assistant_msg for marker in kb_list_markers)
+
+            if kb_list_in_last_msg:
+                logger.info("Previous assistant message appears to be KB list. Biasing towards KB query/analysis.")
+                # Strong boost for kb_query
+                intent_scores["kb_query"] += refers_score * 1.5
+
+                # Check if this is a comparison query
+                comparison_keywords = ["identical", "compare", "similar", "same", "difference", "different"]
+                is_comparison_query = any(keyword in user_query.lower() for keyword in comparison_keywords)
+
+                if is_comparison_query:
+                    # Boost analyze_template for comparison queries
+                    intent_scores["analyze_template"] += refers_score * 1.0
+                    logger.info("Query appears to be comparing KB files. Boosting analyze_template score.")
+
+                # If no temp files are present, strongly suppress temp_context_query
+                if not has_temp_files:
+                    intent_scores["temp_context_query"] *= (1.0 - refers_score)
+                    logger.info(f"No temp files present. Reducing temp_context_query score to {intent_scores['temp_context_query']:.4f}")
+
+                # Set the KB file reference flag
+                kb_file_reference_detected = True
+
+        # Also check the kb_file_reference_score as a backup
+        elif kb_file_reference_score > 0.5:  # Threshold for considering it a reference
+            kb_file_reference_detected = True
+            logger.info(f"Detected reference to KB files with score: {kb_file_reference_score:.4f}")
+            # Boost kb_query score significantly for file references
+            intent_scores["kb_query"] += kb_file_reference_score * 1.0
 
         # Add conversation bias to our scores
         for intent, bias in conversation_bias.items():
@@ -459,6 +585,30 @@ async def determine_final_intent(
     # Ensure query is always included in details
     if "query" not in final_details:
         final_details["query"] = user_query
+
+    # Handle KB file reference detection
+    if final_intent == "kb_query" and kb_file_reference_detected:
+        # Set kb_query_type to file_analysis for queries about previously listed KB files
+        final_details["kb_query_type"] = "file_analysis"
+        logger.info("Setting kb_query_type to file_analysis based on detected reference to KB files")
+
+        # Add analysis type based on query content
+        if any(word in user_query.lower() for word in ["identical", "same", "similar", "compare", "difference", "different"]):
+            final_details["analysis_type"] = "comparison"
+        elif any(word in user_query.lower() for word in ["size", "largest", "smallest", "bigger", "smaller"]):
+            final_details["analysis_type"] = "size_analysis"
+        elif any(word in user_query.lower() for word in ["date", "created", "modified", "when", "time", "latest", "newest", "oldest"]):
+            final_details["analysis_type"] = "date_analysis"
+        elif any(word in user_query.lower() for word in ["content", "contain", "about", "topic", "subject", "information"]):
+            final_details["analysis_type"] = "content_analysis"
+        else:
+            final_details["analysis_type"] = "general_analysis"
+
+        # Add a flag indicating that this is a follow-up query
+        final_details["is_followup_query"] = True
+
+        # Log the detection of a follow-up query about KB files
+        logger.info(f"Detected follow-up query about KB files with analysis_type: {final_details['analysis_type']}")
 
     return final_intent, final_details
 
