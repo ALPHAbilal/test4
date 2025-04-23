@@ -2163,6 +2163,8 @@ final_synthesizer_agent = Agent(
     name="FinalSynthesizerAgent",
     instructions="""Synthesize final answer from query & context (KB or temp file).
 
+    DETECT the language of the user's query and respond ENTIRELY in that language.
+
     IMPORTANT RULES:
     1. NEVER fabricate information that is not in the provided context
     2. If the context doesn't contain information to answer the query, clearly state this limitation
@@ -2204,6 +2206,8 @@ final_synthesizer_agent = Agent(
 meta_query_synthesizer_agent = Agent(
     name="MetaQuerySynthesizerAgent",
     instructions="""You are a specialized agent for formatting knowledge base file lists.
+
+    DETECT the language of the user's query and respond ENTIRELY in that language.
 
     CONTEXT:
     You will receive structured data about knowledge base files (usually in JSON format prefaced with "Knowledge Base File List Data (JSON):").
@@ -3492,24 +3496,52 @@ class PrintTraceProcessor(TracingProcessor): # Inherit from TracingProcessor
     """A simple trace processor that prints trace details using logger."""
 
     def on_trace_start(self, trace: Trace) -> None:
-        logger.debug(f"[TRACE START] ID: {trace.trace_id}, Workflow: {trace.workflow_name}, Start: {trace.start_time}")
+        # Log only the trace_id which should be available
+        logger.debug(f"[TRACE START] ID: {trace.trace_id}")
+        # Uncomment to debug available attributes
+        # logger.debug(f"[TRACE START] Available trace attributes: {dir(trace)}")
 
     def on_trace_end(self, trace: Trace) -> None:
-        duration = (trace.end_time - trace.start_time).total_seconds() if trace.end_time and trace.start_time else "N/A"
-        error_msg = f", Error: {trace.error}" if trace.error else ""
-        logger.debug(f"[TRACE END] ID: {trace.trace_id}, Workflow: {trace.workflow_name}, Duration: {duration}s{error_msg}")
+        # Avoid accessing potentially non-existent attributes
+        error_msg = f", Error: {trace.error}" if hasattr(trace, 'error') and trace.error else ""
+        logger.debug(f"[TRACE END] ID: {trace.trace_id}{error_msg}")
 
     def on_span_start(self, span: Span[Any]) -> None:
-        # Limit input log length
-        input_str = str(span.input)[:200] + ('...' if len(str(span.input)) > 200 else '') if span.input else "None"
-        logger.debug(f"  [SPAN START] ID: {span.span_id}, Parent: {span.parent_id}, Name: {span.name}, Type: {span.type}, Input: {input_str}")
+        # Safely access span attributes with fallbacks
+        span_id = getattr(span, 'span_id', 'unknown')
+        parent_id = getattr(span, 'parent_id', 'unknown')
+        name = getattr(span, 'name', 'unknown')
+        span_type = getattr(span, 'type', 'unknown')
+
+        # Safely handle input
+        input_str = "None"
+        if hasattr(span, 'input') and span.input:
+            try:
+                input_str = str(span.input)[:200] + ('...' if len(str(span.input)) > 200 else '')
+            except Exception:
+                input_str = "<unprintable>"
+
+        logger.debug(f"  [SPAN START] ID: {span_id}, Parent: {parent_id}, Name: {name}, Type: {span_type}, Input: {input_str}")
 
     def on_span_end(self, span: Span[Any]) -> None:
-        duration = (span.end_time - span.start_time).total_seconds() if span.end_time and span.start_time else "N/A"
-        error_msg = f", Error: {span.error}" if span.error else ""
-        # Limit output log length
-        output_str = str(span.output)[:200] + ('...' if len(str(span.output)) > 200 else '') if span.output else "None"
-        logger.debug(f"  [SPAN END] ID: {span.span_id}, Name: {span.name}, Duration: {duration}s, Output: {output_str}{error_msg}")
+        # Safely access span attributes with fallbacks
+        span_id = getattr(span, 'span_id', 'unknown')
+        name = getattr(span, 'name', 'unknown')
+
+        # Safely handle error message
+        error_msg = ""
+        if hasattr(span, 'error') and span.error:
+            error_msg = f", Error: {span.error}"
+
+        # Safely handle output
+        output_str = "None"
+        if hasattr(span, 'output') and span.output:
+            try:
+                output_str = str(span.output)[:200] + ('...' if len(str(span.output)) > 200 else '')
+            except Exception:
+                output_str = "<unprintable>"
+
+        logger.debug(f"  [SPAN END] ID: {span_id}, Name: {name}, Output: {output_str}{error_msg}")
 
     def shutdown(self) -> None:
         # Called when the application using the SDK is shutting down gracefully.
