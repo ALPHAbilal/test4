@@ -30,6 +30,7 @@ from semantic_cache import semantic_search_cache
 from agents import Agent, Runner, Handoff, RunContextWrapper, function_tool, AgentOutputSchema
 from agents.result import RunResult  # Import for extract_final_answer function
 from agents.agent_output import AgentOutputSchema as AgentOutputSchemaClass  # Import for custom Runner
+from agents import items as agents_items  # Import for ToolCallItem and ToolCallOutputItem
 # --- CORRECTED & CONFIRMED Tracing Imports ---
 from agents.tracing.processor_interface import TracingProcessor # Correct base class path
 from agents.tracing.traces import Trace # Correct type hint path
@@ -242,21 +243,46 @@ async def add_files_to_vector_store(vector_store_id, file_paths_with_names, all_
 
 
 # --- Pydantic Models ---
+class SourceMetadata(BaseModel):
+    """Metadata about a source document used in retrieval."""
+    file_id: str = Field(description="The ID of the file in the vector store")
+    file_name: str = Field(description="The name of the file")
+    section: Optional[str] = Field(None, description="Section or page information if available")
+    confidence: float = Field(description="Confidence score for this source (0-1)")
+
 class RetrievalSuccess(BaseModel):
     content: str
     source_filename: str
+    sources: List[SourceMetadata] = Field(default_factory=list, description="Metadata about the sources of this content")
 
 class RetrievalError(BaseModel):
     error_message: str
     details: Optional[str] = None
+    query_attempted: Optional[str] = Field(None, description="The query that was attempted")
 
 # Import the shared data model
 from data_models import ExtractedData
 
 class FinalAnswer(BaseModel):
     markdown_response: str
+    sources_used: List[SourceMetadata] = Field(default_factory=list, description="Sources used to generate this response")
 
     model_config = ConfigDict(extra='ignore')
+
+    def format_with_sources(self) -> str:
+        """Format the response with source attribution."""
+        if not self.sources_used:
+            return self.markdown_response
+
+        # Add sources section at the end
+        sources_section = "\n\n## Sources\n"
+        for i, source in enumerate(self.sources_used, 1):
+            sources_section += f"{i}. **{source.file_name}** "
+            if source.section:
+                sources_section += f"(Section: {source.section}) "
+            sources_section += f"- Confidence: {source.confidence:.2f}\n"
+
+        return self.markdown_response + sources_section
 
     @classmethod
     def model_validate_json(cls, json_data, **kwargs):
@@ -323,7 +349,67 @@ class AnalysisResult(BaseModel):
 # --- Tool Definitions ---
 
 @function_tool(strict_mode=False)
-async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, query_or_identifier: str) -> Union[RetrievalSuccess, RetrievalError]:
+async def list_knowledge_base_files(ctx: RunContextWrapper, vs_id: Optional[str] = None) -> Union[Dict[str, Any], Dict[str, str]]:
+    """Lists all files in the knowledge base.
+
+    This tool provides a list of all documents available in the specified knowledge base.
+    Use this tool when the user asks about what's in the knowledge base or what documents are available.
+
+    Args:
+        vs_id: Optional vector store ID. If not provided, uses the one from context.
+
+    Returns:
+        A dictionary containing the list of files and their metadata.
+    """
+    logger.info(f"[Tool Call] list_knowledge_base_files")
+    tool_context = ctx.context
+    vector_store_id = vs_id or tool_context.get("vector_store_id")
+    tool_client = tool_context.get("client")
+
+    if not tool_client or not vector_store_id:
+        return {"error": "Tool configuration error. Missing client or vector store ID."}
+
+    try:
+        # Get the list of files in the vector store
+        files_response = await asyncio.to_thread(tool_client.vector_stores.files.list, vector_store_id=vector_store_id)
+
+        if not files_response or not files_response.data:
+            return {"files": [], "message": "No files found in the knowledge base."}
+
+        # Process the files to get more details
+        files_info = []
+        for file_obj in files_response.data:
+            try:
+                # Get more details about the file
+                file_details = await asyncio.to_thread(tool_client.files.retrieve, file_id=file_obj.id)
+
+                # Extract relevant information
+                file_info = {
+                    "id": file_obj.id,
+                    "filename": file_details.filename,
+                    "purpose": getattr(file_details, "purpose", "unknown"),
+                    "created_at": str(getattr(file_details, "created_at", "unknown")),
+                    "size": getattr(file_details, "bytes", 0),
+                }
+
+                files_info.append(file_info)
+            except Exception as file_err:
+                logger.error(f"Error getting details for file {file_obj.id}: {file_err}")
+                # Include basic info even if details retrieval fails
+                files_info.append({"id": file_obj.id, "filename": getattr(file_obj, "filename", f"File-{file_obj.id[-6:]}")})
+
+        return {
+            "files": files_info,
+            "count": len(files_info),
+            "vector_store_id": vector_store_id,
+            "message": f"Found {len(files_info)} files in the knowledge base."
+        }
+    except Exception as e:
+        logger.error(f"Error listing knowledge base files: {e}", exc_info=True)
+        return {"error": f"Failed to list knowledge base files: {str(e)}"}
+
+@function_tool(strict_mode=False)
+async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, query_or_identifier: str, included_file_ids: Optional[List[str]] = Field(None, description="Optional list of file IDs to limit the search/retrieval to.")) -> Union[RetrievalSuccess, RetrievalError]:
     """Retrieves content from the knowledge base (Vector Store) based on document type and query/identifier."""
     logger.info(f"[Tool Call] get_kb_document_content: type='{document_type}', query='{query_or_identifier[:50]}...'")
     tool_context = ctx.context
@@ -333,10 +419,30 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
     if not tool_client or not vs_id:
         return RetrievalError(error_message="Tool config error.")
 
+    # Get file inclusion settings from parameter or context
+    file_ids_to_filter = []
+
+    # 1. Prioritize the 'included_file_ids' parameter if provided by the agent
+    if included_file_ids is not None and len(included_file_ids) > 0:
+        file_ids_to_filter = included_file_ids
+        logger.info(f"Using file IDs from tool parameter: {file_ids_to_filter}")
+    # 2. If parameter not provided, fall back to chat_db lookup (original logic)
+    elif chat_id and chat_db:
+        try:
+            chat_files = await asyncio.to_thread(chat_db.get_chat_files, chat_id)
+            file_ids_to_filter = [file["file_id"] for file in chat_files if file["included"]]
+            if file_ids_to_filter:
+                logger.info(f"Using {len(file_ids_to_filter)} included files for chat {chat_id} from DB")
+        except Exception as e:
+            logger.warning(f"Error getting included files for chat {chat_id} from DB: {e}")
+    else:
+        # No specific file IDs provided via parameter or chat context
+        logger.info("No specific file IDs for filtering. Performing general search.")
+
     # Prepare filter information for cache lookup
     filter_info = {
         'document_type': document_type,
-        'included_file_ids': included_file_ids if included_file_ids else []
+        'included_file_ids': file_ids_to_filter
     }
 
     # Check semantic cache first
@@ -357,16 +463,7 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
     except Exception as cache_err:
         logger.warning(f"Semantic cache lookup failed: {cache_err}. Falling back to direct search.")
 
-    # Get file inclusion settings if chat_id is provided
-    included_file_ids = []
-    if chat_id and chat_db:
-        try:
-            chat_files = await asyncio.to_thread(chat_db.get_chat_files, chat_id)
-            included_file_ids = [file["file_id"] for file in chat_files if file["included"]]
-            if included_file_ids:
-                logger.info(f"Using {len(included_file_ids)} included files for chat {chat_id}")
-        except Exception as e:
-            logger.warning(f"Error getting included files for chat {chat_id}: {e}")
+    # We've already determined file_ids_to_filter above, so we'll use that instead of fetching again
 
     # First try with a filter for more precise results
     try:
@@ -380,16 +477,16 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
         else:
             logger.info(f"Not filtering by document_type: '{document_type}' is considered general")
 
-        # Add file filter if we have included files
-        if included_file_ids:
+        # Add file filter if we have files to filter
+        if file_ids_to_filter:
             # OpenAI API doesn't support 'in' filter type, so we need to use 'or' with multiple 'eq' filters
-            if len(included_file_ids) == 1:
+            if len(file_ids_to_filter) == 1:
                 # If only one file ID, use a simple 'eq' filter
-                filters.append({"type": "eq", "key": "id", "value": included_file_ids[0]})
-            elif len(included_file_ids) > 1:
+                filters.append({"type": "eq", "key": "id", "value": file_ids_to_filter[0]})
+            elif len(file_ids_to_filter) > 1:
                 # If multiple file IDs, use 'or' with multiple 'eq' filters
                 file_filters = []
-                for file_id in included_file_ids:
+                for file_id in file_ids_to_filter:
                     file_filters.append({"type": "eq", "key": "id", "value": file_id})
 
                 # Add the combined OR filter
@@ -421,14 +518,14 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
             search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
             search_variant_descriptions.append(f"All filters: {json.dumps(filter_obj, indent=2)}")
 
-        # Variant 2: Search with just file filters (if we have included files)
-        if included_file_ids:
+        # Variant 2: Search with just file filters (if we have files to filter)
+        if file_ids_to_filter:
             # Create file filter using supported filter types
-            if len(included_file_ids) == 1:
-                file_filter = {"type": "eq", "key": "id", "value": included_file_ids[0]}
+            if len(file_ids_to_filter) == 1:
+                file_filter = {"type": "eq", "key": "id", "value": file_ids_to_filter[0]}
             else:
                 file_filters = []
-                for file_id in included_file_ids:
+                for file_id in file_ids_to_filter:
                     file_filters.append({"type": "eq", "key": "id", "value": file_id})
                 file_filter = {"type": "or", "filters": file_filters}
 
@@ -449,7 +546,7 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
             doc_type_filter = {"type": "eq", "key": "document_type", "value": document_type}
 
             # Only add this variant if it's different from previous ones
-            if (not filter_obj or filter_obj != doc_type_filter) and (not included_file_ids or doc_type_filter != file_filter):
+            if (not filter_obj or filter_obj != doc_type_filter) and (not file_ids_to_filter or doc_type_filter != file_filter):
                 search_params = {
                     "vector_store_id": vs_id,
                     "query": query_or_identifier,
@@ -525,8 +622,23 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
             source_filename = search_results.data[0].filename or f"FileID:{search_results.data[0].file_id[-6:]}"
             logger.info(f"[Tool Result] KB Content Found for query '{query_or_identifier[:30]}...'. Len: {len(content)}")
 
-            # Create result object
-            result = RetrievalSuccess(content=content, source_filename=source_filename)
+            # Collect source metadata
+            sources = []
+            for res in search_results.data:
+                source = SourceMetadata(
+                    file_id=res.file_id,
+                    file_name=res.filename or f"FileID:{res.file_id[-6:]}",
+                    section=None,  # Would need to extract from metadata if available
+                    confidence=res.score  # Assuming score is available
+                )
+                sources.append(source)
+
+            # Create result object with sources
+            result = RetrievalSuccess(
+                content=content,
+                source_filename=source_filename,
+                sources=sources
+            )
 
             # Store in semantic cache
             try:
@@ -707,107 +819,236 @@ async def detect_required_fields_from_template(template_content: str, template_n
 
 def extract_final_answer(run_result: RunResult) -> str:
     """Extracts markdown response from FinalAnswer Pydantic model in RunResult,
-       handling potential errors or unexpected output types."""
+       with robust fallbacks for plain text output or extraction errors."""
     try:
+        logger.info(f"[DEBUG TRACE] extract_final_answer called with RunResult type: {type(run_result)}")
         final_output = run_result.final_output
+        logger.info(f"[DEBUG TRACE] final_output type: {type(final_output)}")
 
-        # Case 1: We got a FinalAnswer instance
+        # Case 1: The intended and validated structured output
         if isinstance(final_output, FinalAnswer):
-            return final_output.markdown_response
+            logger.info(f"[DEBUG TRACE] Found FinalAnswer instance, calling format_with_sources()")
+            result = final_output.format_with_sources()
+            logger.info(f"[DEBUG TRACE] format_with_sources() returned: {result[:200]}...")
+            return result
 
-        # Case 2: We got a dictionary that might contain markdown_response
-        elif isinstance(final_output, dict) and 'markdown_response' in final_output:
+        # --- Start Robust Fallback Logic ---
+        logger.warning(f"[DEBUG TRACE] Expected FinalAnswer, but final_output was type: {type(final_output)}. Attempting fallbacks.")
+
+        # Fallback A: Check the messages list for the last assistant message
+        # This is the most common place for an agent's text output
+        if hasattr(run_result, 'messages') and isinstance(run_result.messages, list):
+            logger.info(f"[DEBUG TRACE] Checking {len(run_result.messages)} messages for assistant content.")
+            for msg in reversed(run_result.messages):
+                 # Check for both dictionary format (from previous logs) and potential object format
+                 if isinstance(msg, dict) and msg.get('role') == 'assistant' and msg.get('content'):
+                       logger.info(f"[DEBUG TRACE] Fallback A: Found assistant message (dict).")
+                       return msg.get('content')
+                 if hasattr(msg, 'role') and hasattr(msg, 'content') and msg.role == 'assistant' and isinstance(msg.content, str):
+                       logger.info(f"[DEBUG TRACE] Fallback A: Found assistant message (object).")
+                       return msg.content
+
+        # Fallback B: Check if final_output is a dictionary with markdown_response
+        if isinstance(final_output, dict) and 'markdown_response' in final_output:
+            logger.info(f"[DEBUG TRACE] Fallback B: Found dict with markdown_response key")
             md_resp = final_output['markdown_response']
 
             # If markdown_response is a string, use it directly
             if isinstance(md_resp, str):
-                logger.warning(f"Got dict with markdown_response string. Extracting directly.")
+                logger.info(f"[DEBUG TRACE] Fallback B: markdown_response is string, returning directly")
                 return md_resp
-
-            # If markdown_response is a dict, handle it specially
+            # If it's a dict with title/content, format it nicely
             elif isinstance(md_resp, dict):
-                logger.warning(f"Got nested markdown_response structure. Attempting to extract content.")
-
-                # Try to extract title and content
                 title = md_resp.get('title', '')
                 content = md_resp.get('content', '')
+                if title:
+                    result = f"# {title}\n\n{content if content else 'No detailed information available about this topic.'}"
+                    logger.info(f"[DEBUG TRACE] Fallback B: Formatted title/content")
+                    return result
 
-                # Handle the case where it has title and type fields (common error pattern)
-                if 'type' in md_resp and not content:
-                    if title:
-                        return f"# {title}\n\nNo detailed information available about this topic."
-                    else:
-                        return "No information available about the knowledge base."
-                elif title and not content:
-                    return f"# {title}\n\nNo detailed information available about this topic."
-                elif title and content:
-                    return f"# {title}\n\n{content}"
-                else:
-                    # Try to convert the entire nested dict to a string representation
-                    try:
-                        return f"Information about the knowledge base:\n\n{json.dumps(md_resp, indent=2)}"
-                    except:
-                        return "No information available about the knowledge base."
-            else:
-                # If markdown_response is neither string nor dict, convert to string
-                logger.warning(f"Got unexpected markdown_response type: {type(md_resp)}. Converting to string.")
-                try:
-                    return str(md_resp)
-                except:
-                    return "Error: Could not convert response to string format."
-
-        # Case 3: We got a string that might be the direct response
-        elif isinstance(final_output, str):
-            logger.warning(f"Got string instead of FinalAnswer model. Using directly.")
+        # Fallback C: Check if final_output is a string
+        if isinstance(final_output, str):
+            logger.info(f"[DEBUG TRACE] Fallback C: final_output is string, returning directly")
             return final_output
 
-        # Case 4: Try to extract from raw response text
-        elif hasattr(run_result, 'raw_response') and run_result.raw_response:
-            logger.warning(f"Attempting to extract from raw_response.")
+        # Fallback D: Try to_input_list() to find the last assistant message
+        # This is the original Case 5 fallback logic
+        if hasattr(run_result, 'to_input_list'):
             try:
-                # Try to parse the raw response as JSON
-                raw_text = run_result.raw_response
-                if isinstance(raw_text, str):
-                    # Look for JSON object in the raw text
-                    start_idx = raw_text.find('{')
-                    end_idx = raw_text.rfind('}')
-                    if start_idx >= 0 and end_idx > start_idx:
-                        json_str = raw_text[start_idx:end_idx+1]
-                        data = json.loads(json_str)
-                        if 'markdown_response' in data:
-                            md_resp = data['markdown_response']
-                            if isinstance(md_resp, str):
-                                return md_resp
-                            elif isinstance(md_resp, dict):
-                                title = md_resp.get('title', '')
-                                if title:
-                                    return f"# {title}\n\nNo detailed information available about this topic."
-                return raw_text  # Use the raw text as a fallback
-            except Exception as raw_err:
-                logger.error(f"Error extracting from raw_response: {raw_err}")
-                # Continue to fallback methods
+                logger.info(f"[DEBUG TRACE] Fallback D: Checking to_input_list() for assistant messages")
+                history_list = run_result.to_input_list()
+                # Find the last message in the history list generated by an assistant
+                last_msg = next((msg for msg in reversed(history_list) if msg.get('role') == 'assistant'), None)
+                if last_msg and isinstance(last_msg.get('content'), str):
+                    logger.info(f"[DEBUG TRACE] Fallback D: Found assistant message in history")
+                    return last_msg.get('content')
+            except Exception as e:
+                logger.error(f"[DEBUG TRACE] Fallback D: Error in to_input_list(): {e}")
+                # Continue to next fallback
 
-        # Case 5: Fallback to the last assistant message
-        logger.error(f"Workflow step expected FinalAnswer Pydantic model, but received type: {type(final_output)}. Output: {final_output}")
-        # Try to gracefully fallback to the last assistant message content
-        history_list = run_result.to_input_list()
-        # Find the last message in the history list generated by an assistant
-        last_msg = next((msg for msg in reversed(history_list) if msg.get('role') == 'assistant'), None)
-        if last_msg and isinstance(last_msg.get('content'), str):
-            logger.warning("Falling back to last assistant message content due to unexpected final output type.")
-            # Add a warning to the user that the format might be off
-            return f"*(Warning: Output format unexpected. Displaying last raw message)*\n\n{last_msg.get('content')}"
-        else:
-            # If no suitable fallback message found
-            return "Error: Could not generate final answer in the expected format."
+        # Fallback E: Check the raw_response for a potential text output
+        if hasattr(run_result, 'raw_response') and run_result.raw_response:
+            logger.warning(f"[DEBUG TRACE] Fallback E: Checking raw_response type: {type(run_result.raw_response)}")
+            # Convert raw_response to string if necessary, and check if it seems like text
+            raw_text = str(run_result.raw_response) # Safe conversion
+            if raw_text and len(raw_text) > 10: # Basic check if it's likely actual content
+                # Try to extract JSON if it looks like it contains JSON
+                if '{' in raw_text and '}' in raw_text:
+                    try:
+                        start_idx = raw_text.find('{')
+                        end_idx = raw_text.rfind('}')
+                        if start_idx >= 0 and end_idx > start_idx:
+                            json_str = raw_text[start_idx:end_idx+1]
+                            data = json.loads(json_str)
+                            if 'markdown_response' in data:
+                                md_resp = data['markdown_response']
+                                if isinstance(md_resp, str):
+                                    logger.info(f"[DEBUG TRACE] Fallback E: Found markdown_response in JSON")
+                                    return md_resp
+                    except Exception as json_err:
+                        logger.error(f"[DEBUG TRACE] Fallback E: JSON extraction failed: {json_err}")
+                        # Continue with raw text
+
+                logger.warning(f"[DEBUG TRACE] Fallback E: Returning raw_response as string.")
+                return raw_text # Return the raw text
+
+        # If all fallbacks fail
+        logger.error("[DEBUG TRACE] All extraction fallbacks failed. No usable output found.")
+        # Return a generic error message
+        return "Sorry, I couldn't process the knowledge base information. Please try again."
+
     except Exception as e:
-        # Catch any errors during extraction
-        logger.error(f"Error during answer extraction: {e}", exc_info=True)
-        return f"Sorry, an error occurred while processing your request: {str(e)}\n\nPlease try again with a different query."
+        # Catch any errors during extraction logic itself
+        logger.error(f"[DEBUG TRACE] Critical Error during answer extraction logic: {e}", exc_info=True)
+        # Return a specific error message about the extraction failure
+        return f"Sorry, an internal error occurred while interpreting the AI's response: {str(e)}"
 
-async def run_standard_agent_rag(user_query: str, history: List[Dict[str, str]], workflow_context: Dict, vs_id: Optional[str] = None) -> str:
-    """Implements a simplified RAG workflow using the final_synthesizer_agent.
-    This is used as a fallback when no template or temporary files are specified.
+# --- Helper Functions for KB File Comparison ---
+def extract_tool_output(run_result, tool_name_to_find):
+    """Extract the output of a specific tool from a RunResult.
+
+    Args:
+        run_result: The RunResult from a Runner.run call
+        tool_name_to_find: The name of the tool to find
+
+    Returns:
+        The structured output of the tool, or None if not found
+    """
+    tool_call_id = None
+    tool_structured_output = None
+
+    # First, find the ToolCallItem for the desired tool to get its call_id
+    for item in run_result.new_items:
+        if isinstance(item, agents_items.ToolCallItem):
+            # Check if raw_item has name attribute and it matches our tool name
+            if hasattr(item, 'raw_item') and hasattr(item.raw_item, 'name') and item.raw_item.name == tool_name_to_find:
+                # Found the ToolCallItem for the correct tool
+                # Get the call_id from the raw_item
+                if hasattr(item.raw_item, 'call_id'):
+                    tool_call_id = item.raw_item.call_id
+                    logger.info(f"Found ToolCallItem for '{tool_name_to_find}' with call_id: {tool_call_id}")
+                    break  # Found the initiating tool call
+
+    if tool_call_id is None:
+        logger.error(f"Could not find ToolCallItem for tool '{tool_name_to_find}' in RunResult.new_items.")
+        return None
+
+    # Second, find the corresponding ToolCallOutputItem using the call_id
+    for item in run_result.new_items:
+        if isinstance(item, agents_items.ToolCallOutputItem):
+            # Check if this output item belongs to the tool call id we found
+            if hasattr(item, 'raw_item') and isinstance(item.raw_item, dict) and item.raw_item.get('call_id') == tool_call_id:
+                # Assuming the tool's return value is directly in the 'output' attribute of the ToolCallOutputItem
+                if hasattr(item, 'output'):
+                    logger.info(f"Found matching ToolCallOutputItem with output type: {type(item.output)}")
+                    tool_structured_output = item.output
+                    logger.info(f"Successfully extracted structured output for tool '{tool_name_to_find}' linked by call_id {tool_call_id}.")
+                    break  # Found the tool output
+
+    if tool_structured_output is None:
+        logger.error(f"Could not find ToolCallOutputItem linked to call_id {tool_call_id} in RunResult.new_items.")
+        # Try the final_output as a fallback
+        logger.info("Falling back to final_output for tool result")
+        tool_structured_output = run_result.final_output
+
+    return tool_structured_output
+
+def select_files_for_comparison(files_info: List[Dict], user_query: str) -> List[Dict]:
+    """Select which files to compare based on the user query.
+
+    Args:
+        files_info: List of file dictionaries from the KB
+        user_query: The user's query
+
+    Returns:
+        List of file dictionaries to compare
+    """
+    # If the user specified file names, use those
+    query_lower = user_query.lower()
+    mentioned_files = []
+
+    for file_info in files_info:
+        filename_lower = file_info["filename"].lower()
+        if filename_lower in query_lower:
+            mentioned_files.append(file_info)
+
+    # If specific files were mentioned, use those
+    if len(mentioned_files) >= 2:
+        logger.info(f"Found {len(mentioned_files)} files mentioned in the query")
+        return mentioned_files
+
+    # Otherwise, use the two most recently created files
+    # Sort by created_at in descending order (most recent first)
+    sorted_files = sorted(files_info, key=lambda x: x.get("created_at", ""), reverse=True)
+    selected_files = sorted_files[:2] if len(sorted_files) >= 2 else sorted_files
+
+    logger.info(f"Selected {len(selected_files)} most recent files for comparison")
+    return selected_files
+
+def create_comparison_prompt(file_contents: List[Dict], user_query: str) -> str:
+    """Create a prompt for comparing file contents.
+
+    Args:
+        file_contents: List of dictionaries with file_info and content
+        user_query: The user's query
+
+    Returns:
+        A prompt string for the comparison agent
+    """
+    prompt = f"""Compare the following files based on the user's query: "{user_query}"
+
+"""
+
+    # Add each file's content to the prompt
+    for i, file_content in enumerate(file_contents):
+        file_info = file_content["file_info"]
+        content = file_content["content"]
+
+        # Limit content length to avoid token limits
+        max_content_length = 10000
+        if len(content) > max_content_length:
+            content = content[:max_content_length] + "... [content truncated]"
+
+        prompt += f"""File {i+1}: {file_info['filename']}
+Created: {file_info.get('created_at', 'Unknown')}
+Size: {file_info.get('size', 'Unknown')} bytes
+Content:
+{content}
+
+"""
+
+    prompt += """YOUR TASK:
+1. Compare these files and identify if they are identical, similar, or different.
+2. If they are different, highlight the key differences.
+3. Provide a detailed analysis based on the user's specific question.
+4. Format your response in clear markdown with appropriate sections.
+
+IMPORTANT: Your response MUST be a simple markdown string, not a complex object or JSON."""
+
+    return prompt
+
+async def run_kb_file_comparison(user_query: str, history: List[Dict[str, str]], workflow_context: Dict, vs_id: Optional[str] = None) -> str:
+    """Handles file comparison queries for KB files.
 
     Args:
         user_query: The user's query
@@ -815,93 +1056,804 @@ async def run_standard_agent_rag(user_query: str, history: List[Dict[str, str]],
         workflow_context: The workflow context containing any necessary information
         vs_id: Optional vector store ID (can be extracted from workflow_context if needed)
     """
-    logger.info(f"Running Standard RAG workflow for query: '{user_query[:50]}...'")
+    logger.info(f"Running KB File Comparison workflow for query: '{user_query[:50]}...'")
+
     try:
-        # First, retrieve relevant content from the knowledge base
-        kb_content = ""
-        if vs_id:
-            logger.info(f"Retrieving KB content for query: '{user_query[:50]}...'")
-            kb_context = workflow_context.copy()
+        # 1. Get the list of files to compare
+        kb_context = workflow_context.copy()
+        vector_store_id = vs_id or kb_context.get("vector_store_id")
 
-            # Create a more specific query and document type based on context
-            kb_query = user_query
-            document_type = "general"  # Default document type
+        if not vector_store_id:
+            return "Error: No vector store ID provided for KB file comparison."
 
-            # Get document analyses from the workflow context if available
-            workflow_document_analyses = workflow_context.get("document_analyses", [])
+        # Run the KB Query Agent to list the files
+        agent_input = f"List the files available in the knowledge base. The user wants to compare files."
 
-            # Check if we have document analyses to inform our query
-            if workflow_document_analyses:
-                # Extract document types from analyses
-                doc_types = [analysis.doc_type for analysis in workflow_document_analyses if analysis.confidence > 0.7]
+        kb_list_raw = await Runner.run(
+            kb_query_agent,
+            input=agent_input,
+            context=kb_context
+        )
 
-                if doc_types:
-                    # Use the most common document type with high confidence
-                    from collections import Counter
-                    most_common_type = Counter(doc_types).most_common(1)[0][0]
-                    document_type = most_common_type
-                    logger.info(f"Using document type from analysis: {document_type}")
+        # Extract the file list using the helper function
+        tool_structured_output = extract_tool_output(kb_list_raw, "list_knowledge_base_files")
 
-                    # Enhance query with key sections if available
-                    key_sections = []
-                    for analysis in workflow_document_analyses:
-                        if analysis.key_sections:
-                            key_sections.extend(analysis.key_sections)
+        if not isinstance(tool_structured_output, dict) or "files" not in tool_structured_output:
+            return "I couldn't retrieve the list of files to compare. Please try again."
 
-                    if key_sections:
-                        # Use up to 3 key sections to enhance the query
-                        top_sections = key_sections[:3]
-                        kb_query = f"{user_query} related to {', '.join(top_sections)}"
-                        logger.info(f"Enhanced query with key sections: {kb_query}")
+        # Extract file information
+        files_info = tool_structured_output.get("files", [])
+        file_count = len(files_info)
 
-            # Special case for labor code queries
-            if "code de travail" in user_query.lower() or "labor code" in user_query.lower() or "travail" in user_query.lower():
-                kb_query = f"Moroccan Labor Code information related to: {user_query}"
-                document_type = "code de travail"  # More specific document type
+        if file_count < 2:
+            return "I need at least two files in the knowledge base to perform a comparison. Currently, there are not enough files available."
 
-            # Get KB content using the minimal data gathering agent
-            kb_data_raw = await Runner.run(
-                data_gathering_agent_minimal,
-                input=f"Get KB content about '{document_type}' related to: {kb_query}",
-                context=kb_context
-            )
-            kb_data = kb_data_raw.final_output
+        # 2. Determine which files to compare based on the query
+        files_to_compare = select_files_for_comparison(files_info, user_query)
 
-            # If first attempt fails, try a more general search
-            if isinstance(kb_data, RetrievalError):
-                logger.info(f"First KB retrieval attempt failed. Trying more general search.")
-                # Get KB content using the minimal data gathering agent with a more general document type
-                kb_data_raw = await Runner.run(
-                    data_gathering_agent_minimal,
-                    input=f"Get KB content about 'general' related to: {kb_query}",
-                    context=kb_context
+        if len(files_to_compare) < 2:
+            return "I need at least two files to perform a comparison. Please specify which files you'd like to compare or upload more files to the knowledge base."
+
+        # 3. Retrieve the content of each file
+        file_contents = []
+        for file_info in files_to_compare:
+            # Set up context with the file ID
+            file_context = kb_context.copy()
+            file_context["included_file_ids"] = [file_info["id"]]
+
+            # Log the file context for debugging
+            logger.info(f"[DEBUG CONTENT] file_context for {file_info['filename']}: {file_context}")
+            logger.info(f"[DEBUG CONTENT] file_context keys: {list(file_context.keys())}")
+            logger.info(f"[DEBUG CONTENT] included_file_ids: {file_context.get('included_file_ids')}")
+
+            # --- Construct Input as a LIST of Messages ---
+            # Embed the structured data within the message content as a string
+            message_content = f"""
+            Retrieve the full content from the knowledge base for a specific file for comparison.
+
+            FILE DETAILS:
+            - File ID: {file_info['id']}
+            - Filename: {file_info['filename']}
+
+            YOUR TASK:
+            Use the 'get_kb_document_content' tool to retrieve the full text content for the file specified above.
+            Pass the 'File ID' as the 'included_file_ids' parameter to the tool.
+            Provide a generic query like "full content" or "retrieve" as the 'query_or_identifier' parameter.
+            Provide 'general' as the 'document_type' parameter.
+            Return the result of the tool call.
+            """
+
+            content_agent_input_messages = [
+                {"role": "user", "content": message_content}
+                # You could also include relevant history here if needed by the agent for context
+                # *history
+            ]
+            # ---------------------------------------------
+
+            logger.info(f"Attempting content retrieval for file: {file_info['filename']}")
+            retrieved_success_object = None # Variable to hold the successful RetrievalSuccess object
+
+            # --- Inner Tool Retry Loop ---
+            max_tool_retries = 2
+            tool_retry_delay = 1
+
+            for tool_attempt in range(max_tool_retries):
+                try:
+                    logger.info(f"  Tool Attempt {tool_attempt + 1} of {max_tool_retries}: Calling agent to get content for {file_info['filename']}")
+                    content_raw = await Runner.run(
+                        kb_query_agent,
+                        input=content_agent_input_messages,
+                        context=kb_context
+                    )
+
+                    # --- Extract Tool Output Object from new_items ---
+                    retrieval_tool_output = None
+                    tool_name_to_find = "get_kb_document_content"
+
+                    if hasattr(content_raw, 'new_items') and isinstance(content_raw.new_items, list):
+                        # Find the ToolCallItem to get the call_id
+                        tool_call_id = None
+                        for item in content_raw.new_items:
+                            if isinstance(item, agents_items.ToolCallItem) and hasattr(item, 'raw_item') and hasattr(item.raw_item, 'name') and item.raw_item.name == tool_name_to_find:
+                                 if hasattr(item.raw_item, 'call_id'):
+                                      tool_call_id = item.raw_item.call_id
+                                      break
+
+                        # If ToolCallItem was found, find the corresponding ToolCallOutputItem
+                        if tool_call_id:
+                            for item in content_raw.new_items:
+                                 if isinstance(item, agents_items.ToolCallOutputItem):
+                                     if hasattr(item, 'raw_item') and isinstance(item.raw_item, dict) and item.raw_item.get('call_id') == tool_call_id:
+                                          # This 'output' attribute should hold the actual object returned by the tool function
+                                          if hasattr(item, 'output'):
+                                               retrieval_tool_output = item.output
+                                               logger.info(f"  Tool Attempt {tool_attempt + 1}: Successfully extracted tool output object from new_items for {tool_name_to_find}.")
+                                               break
+                    # --- End Extraction ---
+
+                    # Check if we got a valid RetrievalSuccess object
+                    if isinstance(retrieval_tool_output, RetrievalSuccess) and retrieval_tool_output.content: # Also check if content is not empty
+                        logger.info(f"  Tool Attempt {tool_attempt + 1}: Successfully retrieved and validated content for file {file_info['filename']}.")
+                        retrieved_success_object = retrieval_tool_output # Store the successful object
+                        break # *** Exit the INNER loop immediately on success ***
+
+                    elif isinstance(retrieval_tool_output, RetrievalError):
+                         logger.warning(f"  Tool Attempt {tool_attempt + 1}: Retrieval tool returned RetrievalError: {retrieval_tool_output.error_message}. Retrying...")
+
+                    else: # Unexpected output type from tool
+                         logger.warning(f"  Tool Attempt {tool_attempt + 1}: Retrieval tool output was unexpected type ({type(retrieval_tool_output)}). Retrying...")
+
+                except Exception as e:
+                    logger.error(f"  Tool Attempt {tool_attempt + 1}: Error during agent/tool run for content retrieval for {file_info['filename']}: {e}", exc_info=True)
+                    # The retrieved_success_object will remain None
+
+                if retrieved_success_object is None and tool_attempt < max_tool_retries - 1:
+                     logger.info(f"  Tool Attempt {tool_attempt + 1} failed. Waiting {tool_retry_delay}s before retrying content retrieval for {file_info['filename']}...")
+                     await asyncio.sleep(tool_retry_delay)
+                     # Optional: Exponential backoff
+
+            # --- After the Inner Tool Retry Loop ---
+
+            # Check if we successfully got the object after retries
+            if retrieved_success_object is not None:
+                # *** Add the file content to file_contents ONLY here if successful ***
+                file_contents.append({
+                    "file_info": file_info,
+                    "content": retrieved_success_object.content # Access content from the stored object
+                })
+                logger.info(f"Added content for file {file_info['filename']} to file_contents list.") # Log success clearly
+            else:
+                 # If retrieved_success_object is still None after all retries
+                 logger.warning(f"Content retrieval for file {file_info['filename']} failed after {max_tool_retries} attempts. Skipping this file for comparison.")
+                 # The main check after the loop 'if len(file_contents) < 2:' will handle if not enough files were successful.
+
+        if len(file_contents) < 2:
+            return "I couldn't retrieve enough file content to perform a comparison. Please try again or specify different files."
+
+        # 4. Create a comparison prompt for the analysis agent
+        comparison_prompt = create_comparison_prompt(file_contents, user_query)
+
+        # Create messages for the synthesizer
+        synthesis_messages = history + [{
+            "role": "user",
+            "content": comparison_prompt
+        }]
+
+        # Initialize with a fallback message
+        final_markdown_response = "Sorry, something went wrong while comparing the files."
+
+        # 5. Run the comparison analysis with retries
+        max_retries = 3  # Number of times to retry the synthesis call
+        retry_delay_seconds = 2  # Initial delay before retrying
+        synthesizer_success = False  # Flag to track if synthesis succeeded
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Attempt {attempt + 1} of {max_retries}: Calling meta_query_synthesizer_agent to compare files...")
+
+                # Run the meta-query synthesizer agent with the comparison prompt
+                final_synth_raw = await Runner.run(
+                    meta_query_synthesizer_agent,
+                    input=synthesis_messages,
+                    context=workflow_context
                 )
-                kb_data = kb_data_raw.final_output
 
-            if isinstance(kb_data, RetrievalSuccess):
-                kb_content = kb_data.content
-                logger.info(f"Retrieved KB content for query. Length: {len(kb_content)}")
-            elif isinstance(kb_data, RetrievalError):
-                logger.warning(f"KB retrieval failed: {kb_data.error_message}")
-                # Provide a clear message that the information couldn't be found
-                kb_content = """
-                I couldn't find specific information about this topic in the knowledge base.
-                The search functionality encountered an error or no relevant content was found.
+                # Check for success
+                synthesizer_success = False  # Assume failure unless proven otherwise
 
-                Please try:
-                - A different query
-                - Checking if the relevant files are selected in the knowledge base
-                - Consulting official sources for accurate information
+                # First, check if final_output is a non-empty string
+                if final_synth_raw and hasattr(final_synth_raw, 'final_output') and isinstance(final_synth_raw.final_output, str) and final_synth_raw.final_output.strip():
+                    logger.info(f"Attempt {attempt + 1}: Synthesizer produced string content in final_output.")
+                    logger.info(f"Final output string preview: {final_synth_raw.final_output[:200]}...")
+                    synthesizer_success = True  # Set success flag
+                # If final_output was NOT a string or was empty, check messages as fallback
+                elif final_synth_raw and hasattr(final_synth_raw, 'messages'):
+                    logger.info(f"Attempt {attempt + 1}: final_output was not string, checking messages for assistant content.")
+                    assistant_message_content = None
+                    for msg in reversed(final_synth_raw.messages):  # Check recent messages first
+                        if hasattr(msg, 'role') and hasattr(msg, 'content'):
+                            if msg.role == 'assistant' and msg.content:
+                                assistant_message_content = msg.content
+                                break  # Found the assistant's response
+                        elif isinstance(msg, dict) and msg.get('role') == 'assistant' and msg.get('content'):
+                            assistant_message_content = msg.get('content')
+                            break  # Found the assistant's response
 
-                I can only provide information that exists in the knowledge base and will not generate fabricated content.
-                """
-                logger.info("Using no-results message instead of fabricating information")
+                    if assistant_message_content:
+                        logger.info(f"Attempt {attempt + 1}: Fallback success check: Found assistant message.")
+                        logger.info(f"Assistant message content: {assistant_message_content[:200]}...")
+                        synthesizer_success = True  # Set success flag
+
+                # Exit the retry loop if we found a usable result
+                if synthesizer_success:
+                    logger.info(f"Attempt {attempt + 1}: Synthesis attempt determined successful.")
+                    break
+                else:
+                    logger.warning(f"Attempt {attempt + 1}: Synthesizer run completed, but no usable output found in final_output or messages. Retrying...")
+
+            except Exception as e:
+                # Catch exceptions during the API call itself (timeouts, 502s, etc.)
+                logger.error(f"Attempt {attempt + 1}: Error during synthesis API call: {e}", exc_info=True)
+                synthesizer_success = False  # Ensure flag is false
+
+            if not synthesizer_success and attempt < max_retries - 1:
+                logger.info(f"Attempt {attempt + 1} failed. Waiting {retry_delay_seconds}s before retrying...")
+                await asyncio.sleep(retry_delay_seconds)  # Wait before the next attempt
+                retry_delay_seconds *= 2  # Exponential backoff
+
+        # Final error handling after retries
+        if not synthesizer_success:
+            logger.error(f"All {max_retries} synthesis attempts failed.")
+            return "Sorry, I repeatedly had trouble comparing the files due to an AI service issue. Please try again later."
+
+        # 6. Extract and return the final answer
+        final_markdown_response = extract_final_answer(final_synth_raw)
+
+        # Add sources to the workflow context
+        sources = []
+        for file_content in file_contents:
+            file_info = file_content["file_info"]
+            source = SourceMetadata(
+                file_id=file_info["id"],
+                file_name=file_info["filename"],
+                section=None,
+                confidence=1.0
+            )
+            sources.append(source)
+
+        workflow_context["kb_sources"] = sources
+
+        return final_markdown_response
+
+    except Exception as e:
+        logger.error(f"KB file comparison workflow failed: {e}", exc_info=True)
+        return f"Sorry, an error occurred while comparing the files: {html.escape(str(e))}"
+
+async def run_kb_workflow(user_query: str, history: List[Dict[str, str]], workflow_context: Dict, vs_id: Optional[str] = None) -> str:
+    """Orchestrates the KB workflow based on the query type (meta vs. search).
+    This function branches the workflow based on the kb_query_type determined by the analyzer.
+
+    Args:
+        user_query: The user's query
+        history: The conversation history
+        workflow_context: The workflow context containing any necessary information
+        vs_id: Optional vector store ID (can be extracted from workflow_context if needed)
+    """
+    logger.info(f"Running KB workflow for query: '{user_query[:50]}...'")
+
+    # Get the KB query type from the workflow context
+    kb_query_type = workflow_context.get("kb_query_type")
+    logger.info(f"[CRITICAL DEBUG] kb_query_type from workflow_context: '{kb_query_type}' (type: {type(kb_query_type)})")
+    logger.info(f"[CRITICAL DEBUG] workflow_context keys: {list(workflow_context.keys())}")
+
+    is_meta_query = kb_query_type == "meta"
+    is_file_analysis = kb_query_type == "file_analysis"
+
+    logger.info(f"[CRITICAL DEBUG] is_meta_query: {is_meta_query}")
+    logger.info(f"[CRITICAL DEBUG] is_file_analysis: {is_file_analysis}")
+
+    # Default error response
+    final_markdown_response = "Error: KB workflow failed."
+
+    try:
+        if is_meta_query:
+            # META-QUERY PATH: List KB files
+            logger.info("Executing KB Meta-Query Workflow (List Files)...")
+            final_markdown_response = await run_kb_meta_query(user_query, history, workflow_context, vs_id)
+        elif is_file_analysis:
+            # FILE ANALYSIS PATH: Analyze previously listed KB files
+            logger.info("Executing KB File Analysis Workflow...")
+
+            # Get the analysis type from the details if available
+            analysis_type = workflow_context.get("analysis_type", "general_analysis")
+            logger.info(f"File analysis type: {analysis_type}")
+
+            # Add the analysis type to the workflow context
+            workflow_context["analysis_type"] = analysis_type
+
+            # --- START CRITICAL DEBUG LOG ---
+            logger.info(f"[CRITICAL DEBUG] Checking analysis_type for comparison routing.")
+            logger.info(f"[CRITICAL DEBUG]   analysis_type value: '{analysis_type}' (type: {type(analysis_type)})")
+            logger.info(f"[CRITICAL DEBUG]   user_query.lower() value: '{user_query.lower()}'")
+            logger.info(f"[CRITICAL DEBUG]   String literal comparison result (analysis_type == 'comparison'): {analysis_type == 'comparison'}")
+            logger.info(f"[CRITICAL DEBUG]   'identical' in user_query.lower(): {'identical' in user_query.lower()}")
+            logger.info(f"[CRITICAL DEBUG]   'same' in user_query.lower(): {'same' in user_query.lower()}")
+            logger.info(f"[CRITICAL DEBUG]   'similar' in user_query.lower(): {'similar' in user_query.lower()}")
+            logger.info(f"[CRITICAL DEBUG]   'compare' in user_query.lower(): {'compare' in user_query.lower()}")
+            # --- END CRITICAL DEBUG LOG ---
+
+            # Call the dedicated workflow function for comparison queries
+            # Fix the condition by properly parenthesizing each part of the OR expression
+            is_comparison_type = (analysis_type == "comparison")
+            has_identical = ("identical" in user_query.lower())
+            has_same = ("same" in user_query.lower())
+            has_similar = ("similar" in user_query.lower())
+            has_compare = ("compare" in user_query.lower())
+
+            condition_result = (is_comparison_type or has_identical or has_same or has_similar or has_compare)
+
+            logger.info(f"[CRITICAL DEBUG] Fixed condition components:")
+            logger.info(f"[CRITICAL DEBUG]   is_comparison_type: {is_comparison_type}")
+            logger.info(f"[CRITICAL DEBUG]   has_identical: {has_identical}")
+            logger.info(f"[CRITICAL DEBUG]   has_same: {has_same}")
+            logger.info(f"[CRITICAL DEBUG]   has_similar: {has_similar}")
+            logger.info(f"[CRITICAL DEBUG]   has_compare: {has_compare}")
+            logger.info(f"[CRITICAL DEBUG] Full fixed condition result: {condition_result}")
+
+            if condition_result:
+                # --- Add a log INSIDE this block ---
+                logger.info("[CRITICAL DEBUG] *** Entering comparison workflow branch. ***")
+                # --- Call the NEW comparison workflow ---
+                final_markdown_response = await run_kb_file_comparison(user_query, history, workflow_context, vs_id)
+                # -----------------------------------------
+            else:
+                # --- Add a log INSIDE this block ---
+                logger.warning("[CRITICAL DEBUG] *** Falling through to non-comparison branch. ***")
+                # For other (currently unimplemented) analysis types, keep old behavior or return message
+                logger.warning(f"Analysis type '{analysis_type}' is not fully implemented yet. Listing files instead.")
+                final_markdown_response = await run_kb_meta_query(user_query, history, workflow_context, vs_id)
+                final_markdown_response += f"\n\n**Note:** Analysis type '{analysis_type}' is not yet fully supported."
+        else:
+            # SEARCH PATH: Standard RAG search
+            logger.info("Executing KB Search Query Workflow...")
+            final_markdown_response = await run_kb_search_query(user_query, history, workflow_context, vs_id)
+    except Exception as e:
+        logger.error(f"KB workflow failed: {e}", exc_info=True)
+        final_markdown_response = f"Sorry, an error occurred during processing: {html.escape(str(e))}"
+
+    return final_markdown_response
+
+async def run_kb_meta_query(user_query: str, history: List[Dict[str, str]], workflow_context: Dict, vs_id: Optional[str] = None) -> str:
+    """Handles meta-queries about the KB itself (listing files, etc.).
+
+    Args:
+        user_query: The user's query
+        history: The conversation history
+        workflow_context: The workflow context containing any necessary information
+        vs_id: Optional vector store ID (can be extracted from workflow_context if needed)
+    """
+    logger.info(f"Running KB Meta-Query workflow for query: '{user_query[:50]}...'")
+    try:
+        # Prepare the input for the KB Query Agent
+        kb_context = workflow_context.copy()
+        vector_store_id = vs_id or kb_context.get("vector_store_id")
+
+        if not vector_store_id:
+            return "Error: No vector store ID provided for KB meta-query."
+
+        # Create the agent input for listing files
+        agent_input = f"List the files available in the knowledge base. The user wants to know what's in the KB."
+
+        # Run the KB Query Agent to list the files
+        kb_list_raw = await Runner.run(
+            kb_query_agent,
+            input=agent_input,
+            context=kb_context
+        )
+
+        # Add basic logging for debugging
+        logger.info(f"Type of kb_list_raw: {type(kb_list_raw)}")
+        logger.info(f"Length of kb_list_raw.new_items: {len(kb_list_raw.new_items)}")
+
+        # Extract the file list using the helper function
+        tool_structured_output = extract_tool_output(kb_list_raw, "list_knowledge_base_files")
+
+        if tool_structured_output is None:
+            final_markdown_response = "Sorry, I encountered an internal issue processing the list of files."
+            return final_markdown_response  # Exit
+
+        # Process the result from the list tool
+        if isinstance(tool_structured_output, dict) and "files" in tool_structured_output:
+            # Extract file information
+            files_info = tool_structured_output.get("files", [])
+            file_count = tool_structured_output.get("count", len(files_info))
+
+            # Import json for structured data formatting
+            import json
+
+            # Create structured file list as JSON for the synthesizer
+            structured_file_list = json.dumps(files_info, indent=2)
+            logger.info(f"Structured file list prepared with {file_count} files")
+
+            # Create source metadata for the KB itself
+            kb_source = SourceMetadata(
+                file_id="kb_meta",
+                file_name="Knowledge Base Index",
+                section=None,
+                confidence=1.0
+            )
+            workflow_context["kb_sources"] = [kb_source]
+
+            # Create a prompt for the synthesizer agent with structured data
+            is_file_analysis = workflow_context.get("kb_query_type") == "file_analysis"
+            analysis_type = workflow_context.get("analysis_type", "general_analysis") if is_file_analysis else None
+
+            if is_file_analysis:
+                # Create a prompt for file analysis
+                meta_prompt = f"""The user asked about the files in the knowledge base. This appears to be a follow-up question about previously listed files.
+
+User query: "{user_query}"
+
+Analysis type: {analysis_type}
+
+Here is the structured data about the files in the knowledge base:
+
+Knowledge Base File List Data (JSON):
+{structured_file_list}
+
+Total files: {file_count}
+
+YOUR TASK:
+1. Generate a clear, formatted list of these files with their details.
+2. Include the filename, creation date, and size information in a readable format.
+3. Then provide a specific analysis of these files based on the user's query.
+
+Based on the analysis type "{analysis_type}", focus on:
+- For "comparison": Compare the files in terms of size, date, and type
+- For "size_analysis": Highlight size information and sort files by size
+- For "date_analysis": Highlight date information and sort files by date
+- For "content_analysis": Mention what types of content might be in these files based on their names and extensions
+- For "general_analysis": Provide a general overview of the files
+
+FORMATTING REQUIREMENTS:
+- Use markdown formatting (headers, bullet points, etc.)
+- Start with a clear header like "# Knowledge Base Files Analysis"
+- List each file with its details in a consistent format
+- Group files by type if appropriate
+- Include a specific section addressing the user's query about these files
+
+EXAMPLE OUTPUT FORMAT:
+```
+# Knowledge Base Files Analysis
+
+The knowledge base contains {file_count} files:
+
+## Documents
+1. **document1.pdf** - Created: 2023-01-15, Size: 1.2 MB
+2. **document2.docx** - Created: 2023-02-20, Size: 850 KB
+
+## Analysis of Files
+[Provide specific analysis based on the user's query and analysis type]
+```
+
+IMPORTANT: Your response MUST be a simple markdown string, not a complex object or JSON. Do not include any metadata or structure beyond the markdown content itself."""
+            else:
+                # Standard meta-query prompt
+                meta_prompt = f"""The user asked about the contents of the knowledge base.
+
+Here is the structured data about the files in the knowledge base:
+
+Knowledge Base File List Data (JSON):
+{structured_file_list}
+
+Total files: {file_count}
+
+YOUR TASK:
+1. Generate a clear, formatted list of these files with their details.
+2. Include the filename, creation date, and size information in a readable format.
+3. Then provide a helpful explanation of what the knowledge base contains and how the user can use this information.
+
+FORMATTING REQUIREMENTS:
+- Use markdown formatting (headers, bullet points, etc.)
+- Start with a clear header like "# Knowledge Base Contents"
+- List each file with its details in a consistent format
+- Group files by type if appropriate
+- End with a brief explanation of how to use the knowledge base
+
+EXAMPLE OUTPUT FORMAT:
+```
+# Knowledge Base Contents
+
+The knowledge base contains {file_count} files:
+
+## Documents
+1. **document1.pdf** - Created: 2023-01-15, Size: 1.2 MB
+2. **document2.docx** - Created: 2023-02-20, Size: 850 KB
+
+## How to Use the Knowledge Base
+You can ask questions about any of these documents...
+```
+
+IMPORTANT: Your response MUST be a simple markdown string, not a complex object or JSON. Do not include any metadata or structure beyond the markdown content itself."""
+
+            synthesis_messages = history + [{
+                "role": "user",
+                "content": meta_prompt
+            }]
+
+            # Initialize with a fallback message
+            final_markdown_response = "Sorry, something went wrong while generating the knowledge base file list."
+
+            try:
+                # Log the model being used
+                model, _ = get_model_with_fallback()
+                logger.info(f"Using model: {model} for meta-query synthesis")
+
+                # --- START DEBUG TRACE LOGS (BEFORE SYNTHESIZER CALL) ---
+                logger.info(f"[DEBUG TRACE] Input messages for meta_query_synthesizer_agent:")
+                if synthesis_messages:
+                    for i, msg in enumerate(synthesis_messages):
+                         # Log the content of each message being sent to the synthesizer
+                         logger.info(f"[DEBUG TRACE]   Synth Input Msg {i} Role: {msg.get('role', 'N/A')} Content: {msg.get('content', 'N/A')}")
+                else:
+                    logger.warning("[DEBUG TRACE]   Synthesis input messages list is empty.")
+                logger.info("[DEBUG TRACE] Calling meta_query_synthesizer_agent to format the file list...")
+                # --- END DEBUG TRACE LOGS (BEFORE SYNTHESIZER CALL) ---
+
+                # --- START SYNTHESIS WITH RETRIES ---
+                max_retries = 3  # Number of times to retry the synthesis call
+                retry_delay_seconds = 2  # Initial delay before retrying
+                synthesizer_success = False  # Flag to track if synthesis succeeded
+
+                for attempt in range(max_retries):
+                    try:
+                        logger.info(f"Attempt {attempt + 1} of {max_retries}: Calling meta_query_synthesizer_agent to format the file list...")
+
+                        # Run the specialized meta-query synthesizer agent with the structured file list
+                        # This agent is already configured with output_type=str
+                        final_synth_raw = await Runner.run(
+                            meta_query_synthesizer_agent,
+                            input=synthesis_messages,
+                            context=workflow_context
+                            # No need to override output_type as it's set in the agent definition
+                        )
+
+                        # --- Start Modified Success Check ---
+                        synthesizer_success = False  # Assume failure unless proven otherwise
+
+                        # First, check if final_output is a non-empty string (for meta_query_synthesizer_agent with output_type=str)
+                        if final_synth_raw and hasattr(final_synth_raw, 'final_output') and isinstance(final_synth_raw.final_output, str) and final_synth_raw.final_output.strip():
+                            logger.info(f"Attempt {attempt + 1}: Synthesizer produced string content in final_output.")
+                            logger.info(f"Final output string preview: {final_synth_raw.final_output[:200]}...")
+                            synthesizer_success = True  # Set success flag
+                        # If final_output was NOT a string or was empty, check messages (original logic as fallback)
+                        elif final_synth_raw and hasattr(final_synth_raw, 'messages'):
+                            logger.info(f"Attempt {attempt + 1}: final_output was not string, checking messages for assistant content.")
+                            assistant_message_content = None
+                            for msg in reversed(final_synth_raw.messages):  # Check recent messages first
+                                if hasattr(msg, 'role') and hasattr(msg, 'content'):
+                                    if msg.role == 'assistant' and msg.content:
+                                        assistant_message_content = msg.content
+                                        break  # Found the assistant's response
+                                elif isinstance(msg, dict) and msg.get('role') == 'assistant' and msg.get('content'):
+                                    assistant_message_content = msg.get('content')
+                                    break  # Found the assistant's response
+
+                            if assistant_message_content:
+                                logger.info(f"Attempt {attempt + 1}: Fallback success check: Found assistant message.")
+                                logger.info(f"Assistant message content: {assistant_message_content[:200]}...")
+                                synthesizer_success = True  # Set success flag
+
+                        # Exit the retry loop if we found a usable result
+                        if synthesizer_success:
+                            logger.info(f"Attempt {attempt + 1}: Synthesis attempt determined successful.")
+                            break
+                        else:
+                            logger.warning(f"Attempt {attempt + 1}: Synthesizer run completed, but no usable output found in final_output or messages. Retrying...")
+                        # --- End Modified Success Check ---
+
+                    except Exception as e:
+                        # Catch exceptions during the API call itself (timeouts, 502s, etc.)
+                        logger.error(f"Attempt {attempt + 1}: Error during synthesis API call: {e}", exc_info=True)
+                        # Do NOT set final_markdown_response to the fallback here. Let the loop continue.
+                        synthesizer_success = False  # Ensure flag is false
+
+                    if not synthesizer_success and attempt < max_retries - 1:
+                        logger.info(f"Attempt {attempt + 1} failed. Waiting {retry_delay_seconds}s before retrying...")
+                        await asyncio.sleep(retry_delay_seconds)  # Wait before the next attempt
+                        retry_delay_seconds *= 2  # Exponential backoff
+
+                # --- END SYNTHESIS WITH RETRIES ---
+
+                # --- Final Error Handling after Retries ---
+                if not synthesizer_success:
+                    logger.error(f"All {max_retries} synthesis attempts failed.")
+                    # Set the user-friendly error message ONLY if all retries failed
+                    final_markdown_response = "Sorry, I repeatedly had trouble generating the list of knowledge base files due to an AI service issue. Please try again later."
+                    return final_markdown_response
+
+                # If we reached here, we have a successful synthesis result
+                if synthesizer_success:
+                    # --- START DEBUG TRACE LOGS (AFTER SYNTHESIZER CALL) ---
+                    logger.info(f"[DEBUG TRACE] Synthesizer Run completed successfully after {attempt+1} attempt(s).")
+                    logger.info(f"[DEBUG TRACE]   RunResult type: {type(final_synth_raw)}")
+                    logger.info(f"[DEBUG TRACE]   RunResult final_output type: {type(final_synth_raw.final_output) if final_synth_raw and hasattr(final_synth_raw, 'final_output') else 'N/A' }")
+                    # Log the actual value of final_output
+                    logger.info(f"[DEBUG TRACE]   RunResult final_output value: {final_synth_raw.final_output if final_synth_raw and hasattr(final_synth_raw, 'final_output') else 'N/A'}")
+
+                    # Log the content of *all* messages in the result - this is the AI's conversation turn
+                    if final_synth_raw and hasattr(final_synth_raw, 'messages') and final_synth_raw.messages:
+                        logger.info(f"[DEBUG TRACE]   Synthesizer RunResult messages count: {len(final_synth_raw.messages)}")
+                        for i, msg in enumerate(final_synth_raw.messages):
+                             # Log the content of each message returned by the synthesizer
+                             if hasattr(msg, 'role') and hasattr(msg, 'content'):
+                                 logger.info(f"[DEBUG TRACE]     Synth Output Msg {i} Role: {msg.role} Content: {msg.content}")
+                             elif isinstance(msg, dict):
+                                 logger.info(f"[DEBUG TRACE]     Synth Output Msg {i} Role: {msg.get('role', 'N/A')} Content: {msg.get('content', 'N/A')}")
+                             else:
+                                 logger.info(f"[DEBUG TRACE]     Synth Output Msg {i} Type: {type(msg)}, Value: {msg}")
+                    else:
+                        logger.warning("[DEBUG TRACE]   Synthesizer RunResult.messages is empty or missing. AI might not have produced a message.")
+                    # --- END DEBUG TRACE LOGS (AFTER SYNTHESIZER CALL) ---
+
+                    # Log the last message from the synthesizer, as extract_final_answer likely uses this
+                    if hasattr(final_synth_raw, 'messages') and final_synth_raw.messages and len(final_synth_raw.messages) > 0:
+                        last_synth_message = final_synth_raw.messages[-1]
+                        if hasattr(last_synth_message, 'role') and hasattr(last_synth_message, 'content'):
+                            logger.info(f"[DEBUG TRACE] Last Synthesizer message Role: {last_synth_message.role} Content: {last_synth_message.content[:500]}")
+                        elif isinstance(last_synth_message, dict):
+                            logger.info(f"[DEBUG TRACE] Last Synthesizer message Role: {last_synth_message.get('role', 'N/A')} Content: {last_synth_message.get('content', 'N/A')[:500]}")
+                        else:
+                            logger.info(f"[DEBUG TRACE] Last Synthesizer message: {last_synth_message}")
+
+                    # If we have a FinalAnswer object, add the sources to it
+                    if isinstance(final_synth_raw.final_output, FinalAnswer):
+                        # Add sources from the KB content if available
+                        if "kb_sources" in workflow_context:
+                            final_synth_raw.final_output.sources_used = workflow_context["kb_sources"]
+                            logger.info(f"Added {len(workflow_context['kb_sources'])} sources to the meta-query answer")
+
+                    # Extract the final answer
+                    final_markdown_response = extract_final_answer(final_synth_raw)
+
+                    # --- START DEBUG TRACE LOGS (AFTER EXTRACTION) ---
+                    logger.info(f"[DEBUG TRACE] extract_final_answer completed.")
+                    logger.info(f"[DEBUG TRACE]   final_markdown_response type: {type(final_markdown_response) if final_markdown_response is not None else 'NoneType'}")
+                    # Log the actual value of the extracted response
+                    logger.info(f"[DEBUG TRACE]   final_markdown_response value: {final_markdown_response}")
+                    # --- END DEBUG TRACE LOGS (AFTER EXTRACTION) ---
+
+                    # Log additional details about the extracted response
+                    logger.info(f"extract_final_answer output length: {len(final_markdown_response) if isinstance(final_markdown_response, str) else 'N/A'}")
+                    logger.info(f"extract_final_answer output preview: {final_markdown_response[:500] if isinstance(final_markdown_response, str) else final_markdown_response}...")
+
+                    # Check if the response is empty or None
+                    if not final_markdown_response:
+                        logger.warning("[DEBUG TRACE] extract_final_answer returned empty or None response!")
+                        # Set a fallback response
+                        final_markdown_response = "Sorry, I couldn't generate a response about the knowledge base files. Please try again."
+                        logger.info(f"[DEBUG TRACE] Set fallback response: {final_markdown_response}")
+
+                    logger.info("Successfully generated final response via meta-query synthesis.")
+                # Note: If synthesizer_success is False, we've already returned a fallback message above
+
+            except Exception as e:
+                # Catch potential errors during the synthesis API call
+                logger.error(f"Error during final synthesis in meta-query workflow: {e}", exc_info=True)
+                # Set a user-friendly error message
+                final_markdown_response = "Sorry, I had trouble generating the list of knowledge base files right now. The AI service encountered an issue. Please try again in a moment."
+
+                # If we have specific error types we want to handle differently
+                if "502 Bad Gateway" in str(e):
+                    final_markdown_response = "Sorry, the AI service is temporarily unavailable (502 Bad Gateway). Please try again in a few moments."
+                elif "timeout" in str(e).lower():
+                    final_markdown_response = "Sorry, the request timed out while generating the file list. Please try again with a simpler query."
+
+            # Final check to ensure we're not returning None or empty string
+            if not final_markdown_response:
+                logger.warning("[DEBUG TRACE] Final response is empty or None! Setting fallback response.")
+                final_markdown_response = "Sorry, I couldn't retrieve information about the knowledge base files. Please try again later."
+                logger.info(f"[DEBUG TRACE] Set final fallback response: {final_markdown_response}")
+
+            # --- START DEBUG TRACE LOGS (BEFORE WORKFLOW RETURN) ---
+            logger.info(f"[DEBUG TRACE] KB Meta-Query workflow returning.")
+            # Log the actual value being returned by the workflow
+            logger.info(f"[DEBUG TRACE]   Returning value: type: {type(final_markdown_response) if final_markdown_response is not None else 'NoneType'} value: {final_markdown_response}")
+            # --- END DEBUG TRACE LOGS (BEFORE WORKFLOW RETURN) ---
+
+            # Log additional details about the return value
+            logger.info(f"KB meta-query workflow returning response length: {len(final_markdown_response) if isinstance(final_markdown_response, str) else 'N/A'}")
+            logger.info(f"KB meta-query workflow returning response preview: {final_markdown_response[:500] if isinstance(final_markdown_response, str) else final_markdown_response}...")
+
+            return final_markdown_response
+        elif isinstance(tool_structured_output, dict) and "error" in tool_structured_output:
+            # Error from the list tool
+            error_msg = tool_structured_output.get("error", "Unknown error")
+            logger.warning(f"KB list files failed: {error_msg}")
+            return f"I couldn't retrieve the list of files in the knowledge base. Error: {error_msg}"
+        else:
+            # Unexpected output format
+            logger.warning(f"Unexpected output from KB list agent: {type(tool_structured_output)}")
+            return "I couldn't retrieve the list of files in the knowledge base due to an unexpected error."
+    except Exception as e:
+        logger.error(f"KB meta-query workflow failed: {e}", exc_info=True)
+        return f"Sorry, an error occurred while retrieving the knowledge base contents: {html.escape(str(e))}"
+
+async def run_kb_search_query(user_query: str, history: List[Dict[str, str]], workflow_context: Dict, vs_id: Optional[str] = None) -> str:
+    # Note: vs_id is passed through to maintain API compatibility but not directly used in this function
+    """Handles regular search queries to the KB.
+
+    Args:
+        user_query: The user's query
+        history: The conversation history
+        workflow_context: The workflow context containing any necessary information
+        vs_id: Optional vector store ID (can be extracted from workflow_context if needed)
+    """
+    logger.info(f"Running KB Search Query workflow for query: '{user_query[:50]}...'")
+    try:
+        # Prepare the input for the KB Query Agent
+        kb_context = workflow_context.copy()
+
+        # Create a more specific query and document type based on context
+        kb_query = user_query
+        document_type = "general"  # Default document type
+
+        # Get document analyses from the workflow context if available
+        workflow_document_analyses = workflow_context.get("document_analyses", [])
+
+        # Check if we have document analyses to inform our query
+        if workflow_document_analyses:
+            # Extract document types from analyses
+            doc_types = [analysis.doc_type for analysis in workflow_document_analyses if analysis.confidence > 0.7]
+
+            if doc_types:
+                # Use the most common document type with high confidence
+                from collections import Counter
+                most_common_type = Counter(doc_types).most_common(1)[0][0]
+                document_type = most_common_type
+                logger.info(f"Using document type from analysis: {document_type}")
+
+                # Enhance query with key sections if available
+                key_sections = []
+                for analysis in workflow_document_analyses:
+                    if analysis.key_sections:
+                        key_sections.extend(analysis.key_sections)
+
+                if key_sections:
+                    # Use up to 3 key sections to enhance the query
+                    top_sections = key_sections[:3]
+                    kb_query = f"{user_query} related to {', '.join(top_sections)}"
+                    logger.info(f"Enhanced query with key sections: {kb_query}")
+
+        # Special case for labor code queries
+        if "code de travail" in user_query.lower() or "labor code" in user_query.lower() or "travail" in user_query.lower():
+            kb_query = f"Moroccan Labor Code information related to: {user_query}"
+            document_type = "code de travail"  # More specific document type
+
+        agent_input = f"Get KB content about '{document_type}' related to: {kb_query}"
+
+        # Run the KB Query Agent to search for content
+        kb_data_raw = await Runner.run(
+            kb_query_agent,
+            input=agent_input,
+            context=kb_context
+        )
+        kb_data = kb_data_raw.final_output
+
+        # Process the search result
+        if isinstance(kb_data, RetrievalSuccess):
+            # Regular search result
+            kb_content = kb_data.content
+            kb_sources = kb_data.sources
+            logger.info(f"Retrieved KB content for query. Length: {len(kb_content)}")
+            # Add sources to workflow context for the synthesizer
+            workflow_context["kb_sources"] = kb_sources
+        elif isinstance(kb_data, RetrievalError):
+            # Error from the search tool
+            error_msg = kb_data.error_message
+            logger.warning(f"KB search failed: {error_msg}")
+            # Provide a clear message that the information couldn't be found
+            kb_content = """
+            I couldn't find specific information about this topic in the knowledge base.
+            The search functionality encountered an error or no relevant content was found.
+
+            Please try:
+            - A different query
+            - Checking if the relevant files are selected in the knowledge base
+            - Consulting official sources for accurate information
+
+            I can only provide information that exists in the knowledge base and will not generate fabricated content.
+            """
+            logger.info("Using no-results message instead of fabricating information")
+        else:
+            # Unexpected output format
+            logger.warning(f"Unexpected output from KB search agent: {type(kb_data)}")
+            kb_content = "I couldn't retrieve information from the knowledge base due to an unexpected error."
 
         # Create a prompt that includes the query and KB content
         prompt = f"""Answer the following question using ONLY the knowledge base content provided below.\n\nQuestion: {user_query}\n\nIMPORTANT: If the knowledge base content does not contain information to answer this question, clearly state this limitation. DO NOT fabricate or make up information that is not in the provided content. Accuracy is more important than helpfulness."""
 
-        if kb_content:
-            prompt += f"\n\nRelevant Knowledge Base Content:\n{kb_content}"
+        prompt += f"\n\nRelevant Knowledge Base Content:\n{kb_content}"
 
         synthesis_messages = history + [{
             "role": "user",
@@ -910,18 +1862,20 @@ async def run_standard_agent_rag(user_query: str, history: List[Dict[str, str]],
 
         # Log the model being used
         model, _ = get_model_with_fallback()
-        logger.info(f"Using model: {model} for final synthesis")
+        logger.info(f"Using model: {model} for search query synthesis")
 
         # Run the final synthesizer agent with the query and KB content
         try:
             final_synth_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages, context=workflow_context)
 
-            # Since we removed the output_type, the result might be a string directly
-            if isinstance(final_synth_raw.final_output, str):
-                logger.info("Got string response directly from agent")
-                return final_synth_raw.final_output
+            # If we have a FinalAnswer object, add the sources to it
+            if isinstance(final_synth_raw.final_output, FinalAnswer):
+                # Add sources from the KB content if available
+                if "kb_sources" in workflow_context:
+                    final_synth_raw.final_output.sources_used = workflow_context["kb_sources"]
+                    logger.info(f"Added {len(workflow_context['kb_sources'])} sources to the final answer")
 
-            # Otherwise, try to extract the final answer using our helper function
+            # Extract the final answer
             final_markdown_response = extract_final_answer(final_synth_raw)
             return final_markdown_response
         except Exception as agent_error:
@@ -954,13 +1908,33 @@ async def run_standard_agent_rag(user_query: str, history: List[Dict[str, str]],
                     logger.error(f"Error extracting from error message: {extract_error}")
 
                 # Fallback response if extraction fails
-                return "I don't have detailed information about the knowledge base contents. You can try asking specific questions about topics you're interested in, and I'll search for relevant information in the available documents."
+                return "I don't have detailed information about this topic in the knowledge base. You can try asking specific questions about topics you're interested in, and I'll search for relevant information in the available documents."
             else:
                 # Re-raise if it's not the specific error pattern we're handling
                 raise
     except Exception as e:
-        logger.error(f"Standard RAG workflow failed: {e}", exc_info=True)
-        return f"Sorry, an error occurred during processing: {html.escape(str(e))}"
+        logger.error(f"KB search query workflow failed: {e}", exc_info=True)
+        return f"Sorry, an error occurred while searching the knowledge base: {html.escape(str(e))}"
+
+async def run_standard_agent_rag(user_query: str, history: List[Dict[str, str]], workflow_context: Dict, vs_id: Optional[str] = None) -> str:
+    """Implements a simplified RAG workflow using the final_synthesizer_agent.
+    This is used as a fallback when no template or temporary files are specified.
+
+    Args:
+        user_query: The user's query
+        history: The conversation history
+        workflow_context: The workflow context containing any necessary information
+        vs_id: Optional vector store ID (can be extracted from workflow_context if needed)
+    """
+    logger.info(f"Running Standard Agent RAG workflow for query: '{user_query[:50]}...'")
+
+    try:
+        # Use the new KB workflow function that properly branches based on query type
+        return await run_kb_workflow(user_query, history, workflow_context, vs_id)
+    except Exception as e:
+        logger.error(f"Error in run_standard_agent_rag: {e}", exc_info=True)
+        return f"Sorry, an error occurred while processing your request: {html.escape(str(e))}"
+
 
 # --- Agent Definitions ---
 # Define the minimal Data Gathering Agent
@@ -973,6 +1947,55 @@ data_gathering_agent_minimal = Agent(
     model=COMPLETION_MODEL,
     tool_use_behavior="stop_on_first_tool",
     output_type=Union[RetrievalSuccess, RetrievalError]
+)
+
+# Define the KB Query Agent that can handle both regular searches and meta-queries
+kb_query_agent = Agent(
+    name="KBQueryAgent",
+    instructions="""You are an agent responsible for retrieving information from the knowledge base.
+    You have two tools available:
+    1. get_kb_document_content - Use this for regular searches when the user wants information contained within the knowledge base
+    2. list_knowledge_base_files - Use this when the user wants to know what's in the knowledge base itself (meta-query)
+
+    DECISION PROCESS:
+    - If kb_query_type is "meta" or the user is asking about the contents/structure of the knowledge base itself,
+      use the list_knowledge_base_files tool to provide a list of available documents.
+    - Otherwise, use the get_kb_document_content tool to search for information within the knowledge base.
+
+    SPECIAL INSTRUCTIONS FOR RETRIEVING CONTENT BY FILE ID:
+    - When you receive a message containing "Retrieve the full content from the knowledge base for a specific file" and "FILE DETAILS:",
+      you should extract the File ID from the message and use it with the get_kb_document_content tool.
+    - Example message format:
+      ```
+      Retrieve the full content from the knowledge base for a specific file for comparison.
+
+      FILE DETAILS:
+      - File ID: file123
+      - Filename: document.pdf
+
+      YOUR TASK:
+      Use the 'get_kb_document_content' tool to retrieve the full text content for the file specified above.
+      Pass the 'File ID' as the 'included_file_ids' parameter to the tool.
+      ...
+      ```
+    - For this input, call get_kb_document_content with:
+      * document_type="general"
+      * query_or_identifier="retrieve content"
+      * included_file_ids=["file123"] (the File ID extracted from the message)
+
+    EXAMPLES:
+    - "What does the knowledge base say about labor laws?" → Use get_kb_document_content
+    - "What documents are in the knowledge base?" → Use list_knowledge_base_files
+    - "Tell me about employment contracts" → Use get_kb_document_content
+    - "What files do you have access to?" → Use list_knowledge_base_files
+    - Message containing "FILE DETAILS: - File ID: file123" → Use get_kb_document_content with included_file_ids=["file123"]
+
+    Call the appropriate tool based on the query type and provide its output.
+    """,
+    tools=[get_kb_document_content, list_knowledge_base_files],
+    model=COMPLETION_MODEL,
+    tool_use_behavior="stop_on_first_tool"
+    # No output_type to allow flexibility in return types
 )
 
 query_analyzer_agent = Agent(
@@ -996,6 +2019,18 @@ query_analyzer_agent = Agent(
     IMPORTANT: The presence of a selected template in the UI does NOT automatically mean the intent is `populate_template`.
     The user's query is the primary factor in determining intent.
 
+    SPECIAL CASE - KB META-QUERIES:
+    When the user is asking about the knowledge base itself (not asking for information contained within it),
+    you should still classify this as `kb_query` but add a special field `kb_query_type: "meta"` in the details.
+
+    Examples of KB meta-queries:
+    - "What documents are in the knowledge base?"
+    - "What's in the KB?"
+    - "List the contents of the knowledge base"
+    - "Show me what files are available"
+    - "What topics does the knowledge base cover?"
+    - "What information do you have access to?"
+
     Examples with nuanced reasoning:
     - "Generate a contract for Omar" → `populate_template` (explicit request to create a document)
     - "How many articles are in the labor code?" → `kb_query` (seeking factual information from KB)
@@ -1004,6 +2039,7 @@ query_analyzer_agent = Agent(
     - "Is this contract compliant with labor regulations?" → `kb_query_with_temp_context` (needs both KB and document)
     - "What fields are required in this template?" → `analyze_template` (asking about template structure)
     - "Can you extract the employee details from this document?" → `temp_context_query` (extraction from uploaded file)
+    - "What documents are in the knowledge base?" → `kb_query` with `kb_query_type: "meta"` (asking about KB contents)
 
     For `populate_template` intent:
     - Include a comprehensive list of required fields based on template type and content
@@ -1020,6 +2056,10 @@ query_analyzer_agent = Agent(
     - Indicate whether temporary files should be considered in the analysis
     - Include what aspects of the template should be analyzed
 
+    For `kb_query` intent with `kb_query_type: "meta"`:
+    - Specify that the user is asking about the knowledge base contents itself
+    - Do not include a specific search query as this requires listing files, not searching content
+
     Output a JSON object with the following structure:
     {
         "intent": "one of the intents listed above",
@@ -1027,6 +2067,7 @@ query_analyzer_agent = Agent(
         "details": {
             // Intent-specific details as described above
             // Include reasoning for your determination
+            // For KB meta-queries, include "kb_query_type": "meta"
         }
     }
     """,
@@ -1129,6 +2170,13 @@ final_synthesizer_agent = Agent(
     4. Only provide information that is explicitly supported by the context
     5. If asked about a specific country, language, or document that isn't in the context, clearly state that this information is not available
 
+    SOURCE ATTRIBUTION REQUIREMENTS:
+    1. For each piece of information you provide, indicate which source it came from
+    2. Use inline citations like [Source 1] or [Source 2] when appropriate
+    3. If multiple sources provide the same information, cite all relevant sources
+    4. If information comes from a specific section of a document, mention this
+    5. Include all sources used in your response
+
     Follow this structure:
     1. Task understanding: Briefly restate what you're being asked to do
     2. Context summary: Summarize what information is available in the context
@@ -1136,12 +2184,61 @@ final_synthesizer_agent = Agent(
     4. Final answer: Provide a clear, direct answer based ONLY on the context
     5. Limitations: Explicitly state what information was not available in the context
 
+    Special Case - Knowledge Base File Lists:
+    When you receive structured data about knowledge base files (usually in JSON format prefaced with "Knowledge Base File List Data (JSON):"), format it into a clear, readable list. For each file:
+    - Display the filename prominently
+    - Include relevant metadata like creation date and file size
+    - Organize the files in a numbered or bulleted list
+    - Mention the total number of files at the beginning
+    - Explain how the user can use these files (e.g., "You can ask questions about any of these documents")
+
     Format your response in Markdown.
 
     IMPORTANT: Your response MUST be a simple string, not a complex object. Do not return a JSON object with title and type fields.
     """,
     model=COMPLETION_MODEL,
-    # Remove output_type to avoid schema validation issues
+    output_type=FinalAnswer
+)
+
+# Define a specialized agent for meta-query synthesis (KB file listing)
+meta_query_synthesizer_agent = Agent(
+    name="MetaQuerySynthesizerAgent",
+    instructions="""You are a specialized agent for formatting knowledge base file lists.
+
+    CONTEXT:
+    You will receive structured data about knowledge base files (usually in JSON format prefaced with "Knowledge Base File List Data (JSON):").
+
+    YOUR TASK:
+    1. Generate a clear, formatted list of these files with their details based on the provided JSON data.
+    2. Include the filename, creation date, and size information in a readable format.
+    3. Organize the files in a numbered or bulleted list.
+    4. Mention the total number of files at the beginning.
+    5. Add a brief, helpful explanation of how the user can use these files (e.g., "You can ask questions about any of these documents").
+
+    FORMATTING REQUIREMENTS:
+    - Use markdown formatting (headers, bullet points, etc.)
+    - Start with a clear header like "# Knowledge Base Contents"
+    - List each file with its details in a consistent format
+    - Group files by type if appropriate
+    - End with the brief explanation
+
+    EXAMPLE OUTPUT FORMAT:
+    # Knowledge Base Contents
+
+    The knowledge base contains 5 files:
+
+    ## Documents
+    1. **document1.pdf** - Created: 2023-01-15, Size: 1.2 MB
+    2. **document2.docx** - Created: 2023-02-20, Size: 850 KB
+
+    ## How to Use the Knowledge Base
+    You can ask questions about any of these documents...
+
+    IMPORTANT: Your response MUST be a simple markdown string. Do not include any complex objects or JSON.
+    DO NOT enclose your response in triple backticks (```) or any other code block delimiters.
+    """,
+    model=COMPLETION_MODEL,
+    output_type=str  # Set output_type to str for this specialized agent
 )
 
 # --- Complex Workflow Orchestration ---
@@ -1304,6 +2401,20 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
         # Log the determined intent and details
         logger.info(f"Intent determined by analyzer: {intent}")
         logger.info(f"Details determined by analyzer: {details}")
+
+        # Check for meta-query about KB contents
+        if intent == "kb_query":
+            # Import our local determine_final_intent function
+            from app_intent import determine_final_intent as local_determine_intent
+
+            # Use our local function to check for meta-query
+            _, local_details = local_determine_intent(analyzer_result.final_output)
+
+            # If it's a meta-query, add kb_query_type to the details and workflow context
+            if local_details.get("kb_query_type") == "meta":
+                logger.info("Detected meta-query about KB contents")
+                details["kb_query_type"] = "meta"
+                workflow_context["kb_query_type"] = "meta"
 
         # Enhanced intent determination using our sophisticated LLM-based approach
         logger.info("Using enhanced intent determination with LLM capabilities")
@@ -1964,8 +3075,12 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
 
             # 5. Combine contexts
             combined_context = []
+            kb_sources = []
             if isinstance(kb_data, RetrievalSuccess):
                 combined_context.append(f"### Knowledge Base Content:\n{kb_data.content}")
+                kb_sources = kb_data.sources
+                # Add sources to workflow context for the synthesizer
+                workflow_context["kb_sources"] = kb_sources
             elif isinstance(kb_data, str):
                 combined_context.append(f"### Knowledge Base Content:\n{kb_data}")
             else:
@@ -1977,7 +3092,20 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
             # 6. Run the final synthesizer
             logger.info("Running final synthesizer with combined context")
             synthesis_messages = history + [{"role": "user", "content": f"Answer based on the following document context(s).\n\n{combined_context_str}\n\n### Query:\n{user_query}"}]
-            final_synth_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages)
+            final_synth_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages, context=workflow_context)
+
+            # If we have a FinalAnswer object, add the sources to it
+            if isinstance(final_synth_raw.final_output, FinalAnswer):
+                # Combine sources from KB and temp files
+                combined_sources = []
+                if "kb_sources" in workflow_context:
+                    combined_sources.extend(workflow_context["kb_sources"])
+                if "temp_sources" in workflow_context:
+                    combined_sources.extend(workflow_context["temp_sources"])
+                if combined_sources:
+                    final_synth_raw.final_output.sources_used = combined_sources
+                    logger.info(f"Added {len(combined_sources)} combined sources to the final answer")
+
             final_markdown_response = extract_final_answer(final_synth_raw)
 
         elif intent == "analyze_template":
@@ -2097,6 +3225,25 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
             # Use the final synthesizer agent instead of template populator for analysis
             synthesis_messages = history + [{"role": "user", "content": analyzer_prompt}]
             analyzer_res_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages, context=workflow_context)
+
+            # If we have a FinalAnswer object, add the sources to it
+            if isinstance(analyzer_res_raw.final_output, FinalAnswer):
+                # Combine sources from KB and template
+                combined_sources = []
+                if "kb_sources" in workflow_context:
+                    combined_sources.extend(workflow_context["kb_sources"])
+                # Add template as a source
+                template_source = SourceMetadata(
+                    file_id=f"template_{template_name}",
+                    file_name=template_name,
+                    section=None,
+                    confidence=1.0
+                )
+                combined_sources.append(template_source)
+                if combined_sources:
+                    analyzer_res_raw.final_output.sources_used = combined_sources
+                    logger.info(f"Added {len(combined_sources)} sources to the template analysis")
+
             final_markdown_response = extract_final_answer(analyzer_res_raw)
 
         elif intent == "temp_context_query":
@@ -2107,6 +3254,7 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
 
             # a. Gather content from all temp files
             temp_contexts = []
+            temp_sources = []
             for temp_file in temp_files_info:
                  if temp_file['filename'] in temp_filenames: # Check if file is relevant
                     logger.info(f"Gathering temporary file content: {temp_file['filename']}")
@@ -2120,20 +3268,68 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
                         context=temp_context
                     )
                     temp_data = temp_data_raw.final_output
-                    if isinstance(temp_data, RetrievalSuccess): temp_contexts.append(f"### Context from Uploaded: {temp_file['filename']}\n{temp_data.content}")
+                    if isinstance(temp_data, RetrievalSuccess):
+                        temp_contexts.append(f"### Context from Uploaded: {temp_file['filename']}\n{temp_data.content}")
+                        # Add sources from temp files
+                        if hasattr(temp_data, 'sources') and temp_data.sources:
+                            temp_sources.extend(temp_data.sources)
+                        else:
+                            # Create a source entry for the temp file
+                            temp_source = SourceMetadata(
+                                file_id=f"temp_{len(temp_sources)}",
+                                file_name=temp_file['filename'],
+                                section=None,
+                                confidence=1.0
+                            )
+                            temp_sources.append(temp_source)
                     else: temp_contexts.append(f"### Error processing {temp_file['filename']}:\n{temp_data.error_message if isinstance(temp_data, RetrievalError) else 'Unknown Error'}")
+
+            # Add temp sources to workflow context
+            if temp_sources:
+                workflow_context["temp_sources"] = temp_sources
 
             # b. Synthesize using combined temp context
             combined_temp_context = "\n\n".join(temp_contexts)
             synthesis_messages = history + [{"role": "user", "content": f"Answer based ONLY on the following document context(s).\n\n{combined_temp_context}\n\n### Query:\n{query_about_temp}"}]
-            final_synth_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages)
+            final_synth_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages, context=workflow_context)
+
+            # If we have a FinalAnswer object, add the sources to it
+            if isinstance(final_synth_raw.final_output, FinalAnswer):
+                # Add sources from the temp files if available
+                if "temp_sources" in workflow_context:
+                    final_synth_raw.final_output.sources_used = workflow_context["temp_sources"]
+                    logger.info(f"Added {len(workflow_context['temp_sources'])} temp sources to the final answer")
+
             final_markdown_response = extract_final_answer(final_synth_raw)
 
         else: # Default KB RAG
-            logger.info("Executing Standard KB RAG Workflow...")
+            logger.info("Executing KB Workflow...")
             query_to_run = details.get("query", user_query)
-            # This calls the simplified Planner -> Synthesizer flow
-            final_markdown_response = await run_standard_agent_rag(query_to_run, history, workflow_context, vs_id)
+
+            # Log final_details for debugging
+            logger.info(f"[CRITICAL DEBUG] final_details: {final_details}")
+            logger.info(f"[CRITICAL DEBUG] final_details keys: {list(final_details.keys())}")
+
+            # Update workflow_context with details from intent analysis
+            if 'kb_query_type' in final_details:
+                workflow_context['kb_query_type'] = final_details['kb_query_type']
+                logger.info(f"[CRITICAL DEBUG] Added kb_query_type '{workflow_context['kb_query_type']}' to workflow_context")
+
+            if 'analysis_type' in final_details:
+                workflow_context['analysis_type'] = final_details['analysis_type']
+                logger.info(f"[CRITICAL DEBUG] Added analysis_type '{workflow_context['analysis_type']}' to workflow_context")
+
+            # Add other relevant details if needed by downstream workflows
+            if 'is_followup_query' in final_details:
+                workflow_context['is_followup_query'] = final_details['is_followup_query']
+                logger.info(f"[CRITICAL DEBUG] Added is_followup_query '{workflow_context['is_followup_query']}' to workflow_context")
+
+            # Log workflow_context before calling run_kb_workflow
+            logger.info(f"[CRITICAL DEBUG] workflow_context before calling run_kb_workflow: {workflow_context}")
+            logger.info(f"[CRITICAL DEBUG] workflow_context keys before calling run_kb_workflow: {list(workflow_context.keys())}")
+
+            # This calls our new KB workflow that handles both meta-queries and regular search
+            final_markdown_response = await run_kb_workflow(query_to_run, history, workflow_context, vs_id)
 
     except Exception as workflow_err:
         logger.error(f"Complex Agent workflow failed for VS {vs_id}: {workflow_err}", exc_info=True)
@@ -2243,6 +3439,7 @@ async def chat_api(chat_id):
 
     try:
         # --- Run the NEW Agent Workflow ---
+        logger.info("Calling run_complex_rag_workflow from chat_api endpoint...")
         final_markdown_response = await run_complex_rag_workflow(
             user_query=user_message,
             vs_id=vector_store_id,
@@ -2251,9 +3448,22 @@ async def chat_api(chat_id):
             template_to_populate=template_to_populate,
             chat_id=chat_id
         )
+
+        # Log the response received from the workflow function
+        logger.info(f"[DEBUG TRACE] Flask handler received response from workflow: type: {type(final_markdown_response) if final_markdown_response is not None else 'NoneType'} value: {final_markdown_response}")
+        logger.info(f"chat_api endpoint received response length: {len(final_markdown_response) if isinstance(final_markdown_response, str) else 'N/A'}")
+        logger.info(f"chat_api endpoint received response preview: {final_markdown_response[:500] if isinstance(final_markdown_response, str) else final_markdown_response}...")
+
         # --- Convert Final Markdown to HTML ---
-        try: response_content_html = markdown.markdown(final_markdown_response, extensions=['fenced_code', 'tables', 'nl2br'])
-        except Exception as md_err: logger.error(f"Final Markdown conversion failed: {md_err}"); response_content_html = f"<p>Error formatting response.</p><pre>{html.escape(final_markdown_response)}</pre>"
+        try:
+            # Log before converting to HTML
+            logger.info(f"[DEBUG TRACE] Flask handler preparing to convert markdown to HTML. Value: {final_markdown_response}")
+            response_content_html = markdown.markdown(final_markdown_response, extensions=['fenced_code', 'tables', 'nl2br'])
+            logger.info(f"Successfully converted markdown to HTML, length: {len(response_content_html)}")
+            logger.info(f"[DEBUG TRACE] HTML conversion result: {response_content_html[:200]}...")
+        except Exception as md_err:
+            logger.error(f"Final Markdown conversion failed: {md_err}");
+            response_content_html = f"<p>Error formatting response.</p><pre>{html.escape(final_markdown_response)}</pre>"
         # --- Save Assistant Response ---
         await asyncio.to_thread(chat_db.add_message, chat_id, 'assistant', response_content_html)
 
@@ -2911,6 +4121,55 @@ class NonStrictRunner(Runner):
 
 # Replace the standard Runner with our custom one
 Runner = NonStrictRunner
+
+# --- Test Endpoint for Meta-Queries ---
+@app.route('/test_meta_query', methods=['GET'])
+async def test_meta_query():
+    """Test endpoint to trigger a meta-query directly."""
+    try:
+        # Create a test chat ID
+        chat_id = "test_meta_query_" + str(int(time.time()))
+
+        # Create a meta-query
+        user_message = "What files are in the knowledge base?"
+
+        # Create minimal history
+        history = []
+
+        # Create workflow context
+        workflow_context = {
+            "chat_id": chat_id
+        }
+
+        # Process the message using standard RAG workflow
+        logger.info("Calling run_standard_agent_rag from test_meta_query endpoint...")
+
+        # --- START DEBUG TRACE LOGS (IN FLASK HANDLER) ---
+        logger.info(f"[DEBUG TRACE] Flask handler calling workflow function.")
+        response = await run_standard_agent_rag(user_message, history, workflow_context)
+
+        logger.info(f"[DEBUG TRACE] Flask handler received response from workflow.")
+        # Log the actual value received from the workflow
+        logger.info(f"[DEBUG TRACE]   Received value: type: {type(response) if response is not None else 'NoneType'} value: {response}")
+        # --- END DEBUG TRACE LOGS (IN FLASK HANDLER) ---
+
+        # Log additional details about the response
+        logger.info(f"test_meta_query endpoint received response length: {len(response) if isinstance(response, str) else 'N/A'}")
+        logger.info(f"test_meta_query endpoint received response preview: {response[:500] if isinstance(response, str) else response}...")
+
+        # --- START DEBUG TRACE LOGS (BEFORE SENDING RESPONSE) ---
+        logger.info(f"[DEBUG TRACE] Flask handler preparing to send response to client.")
+        # Log the actual value being sent to the client
+        logger.info(f"[DEBUG TRACE]   Value: {response}")
+        # --- END DEBUG TRACE LOGS (BEFORE SENDING RESPONSE) ---
+
+        return jsonify({
+            "query": user_message,
+            "response": response
+        })
+    except Exception as e:
+        logger.error(f"Error in test_meta_query endpoint: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 # --- Import Async Utilities ---
 from async_utils import setup_async_for_flask
