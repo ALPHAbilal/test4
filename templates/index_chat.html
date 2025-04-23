@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent RAG - Chat</title> <!-- Changed Title -->
+    <style>
+        :root {
+            /* Color Palette (Dark Theme - Claude Inspired) */
+            --bg-dark: #202123;         /* Dark background */
+            --bg-card: #2e2f32;         /* Slightly lighter for cards/inputs */
+            --bg-pre: #1e1f21;          /* Even darker for code blocks */
+            --text-light: #ececec;      /* Primary light text */
+            --text-secondary: #b4b4b4;  /* Secondary/muted text */
+            --accent-color: #8e8ea0;   /* Muted accent (adjust as desired) */
+            --primary-button-bg: #4a4e69; /* Muted button background */
+            --primary-button-hover-bg: #5a5f80;
+            --border-color: #44474a;      /* Subtle borders */
+            --error-color: #f28b82;      /* Muted red for errors */
+            --success-color: #81c995;    /* Muted green for success */
+            --link-color: #a0cff0;
+
+            /* Layout & Spacing */
+            --border-radius: 6px;
+            --spacing-unit: 1rem; /* Approx 16px */
+            --container-max-width: 1100px; /* Slightly wider container */
+
+            /* Typography */
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            --font-family-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        }
+
+        /* Basic reset and body styling */
+        *, *::before, *::after {
+            box-sizing: border-box;
+        }
+        html, body {
+             height: 100%; /* Ensure body takes full height */
+             overflow: hidden; /* Prevent double scrollbars */
+        }
+        body {
+            font-family: var(--font-family);
+            margin: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            line-height: 1.6;
+            font-size: 16px;
+            display: flex; /* Use flexbox for layout */
+            flex-direction: column;
+        }
+
+        /* Container */
+        .container {
+            max-width: var(--container-max-width);
+            margin: 0 auto; /* Center container */
+            padding: calc(var(--spacing-unit) * 1.5) var(--spacing-unit);
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1; /* Allow container to grow */
+            height: 100%; /* Take full body height */
+            overflow: hidden; /* Prevent container itself from scrolling */
+        }
+
+        /* Header Section */
+        .main-header {
+            padding-bottom: calc(var(--spacing-unit) / 2);
+            margin-bottom: var(--spacing-unit);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between; /* Space out title and controls */
+            align-items: center;
+            flex-wrap: wrap; /* Allow wrapping on small screens */
+            gap: var(--spacing-unit);
+        }
+        .main-header h1 {
+            font-size: 1.4em; /* Slightly smaller title */
+            font-weight: 600;
+            color: var(--text-light);
+            border-bottom: none; /* Remove border from h1 */
+            margin: 0; /* Remove default margins */
+            padding: 0;
+        }
+        .kb-selector-group {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-unit);
+        }
+        .kb-selector-group label {
+             margin-bottom: 0; /* Align label better */
+             white-space: nowrap;
+             color: var(--text-secondary);
+             font-size: 0.9em;
+        }
+        .kb-selector-group select {
+             min-width: 200px; /* Give select some base width */
+             flex-grow: 1; /* Allow select to grow */
+             /* Use styles from inputs */
+             padding: calc(var(--spacing-unit) * 0.6);
+             border: 1px solid var(--border-color);
+             background-color: var(--bg-dark);
+             color: var(--text-light);
+             border-radius: var(--border-radius);
+             font-size: 0.9em;
+        }
+
+
+        /* Content Area (Chat + Controls Side Panel) */
+        .main-content {
+            display: flex;
+            flex-grow: 1;
+            gap: var(--spacing-unit);
+            overflow: hidden; /* Prevent content area from causing scroll */
+            height: calc(100% - 80px); /* Adjust based on header/footer height */
+        }
+
+        /* Chat Area */
+        .chat-area {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden; /* Prevent chat area scroll */
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+        }
+        .chat-container {
+            flex-grow: 1;
+            padding: var(--spacing-unit);
+            overflow-y: auto; /* Enable scrolling ONLY for messages */
+            margin-bottom: 0; /* Remove bottom margin */
+            border: none; /* Remove border */
+            background: none; /* Remove separate background */
+        }
+        .chat-message { margin-bottom: var(--spacing-unit); padding: calc(var(--spacing-unit)*0.8); border-radius: var(--border-radius); line-height: 1.5; word-wrap: break-word; max-width: 80%; /* Limit message width */ }
+        .user-message { background-color: rgba(74, 78, 105, 0.4); border: 1px solid var(--primary-button-bg); margin-left: auto; /* Align user messages right */ }
+        .assistant-message { background-color: rgba(46, 47, 50, 0.7); border: 1px solid var(--border-color); margin-right: auto; /* Align assistant messages left */}
+        .message-sender { font-weight: bold; display: block; margin-bottom: 0.3em; font-size: 0.8em; text-transform: uppercase; color: var(--text-secondary); }
+        .message-content { white-space: pre-wrap; }
+
+        /* Chat Input Area */
+        .chat-input-area { display: flex; gap: var(--spacing-unit); padding: var(--spacing-unit); border-top: 1px solid var(--border-color); background-color: var(--bg-card); /* Match chat area bg */}
+        #user-message { flex-grow: 1; /* Use input styles from above */ padding: calc(var(--spacing-unit) * 0.75); border: 1px solid var(--border-color); background-color: var(--bg-dark); color: var(--text-light); border-radius: var(--border-radius); font-size: 1em; }
+        #send-button { white-space: nowrap; /* Use button styles */ background-color: var(--primary-button-bg); color: var(--text-light); padding: calc(var(--spacing-unit) * 0.75) calc(var(--spacing-unit) * 1.5); border: none; border-radius: var(--border-radius); cursor: pointer; font-size: 1em; font-weight: 500; transition: background-color 0.2s ease; }
+        #send-button:hover { background-color: var(--primary-button-hover-bg); }
+
+
+        /* Control Side Panel */
+        .control-panel {
+            width: 320px; /* Fixed width for the side panel */
+            flex-shrink: 0; /* Prevent shrinking */
+            display: flex;
+            flex-direction: column;
+            gap: calc(var(--spacing-unit) * 1.5);
+            padding: var(--spacing-unit);
+            background-color: var(--bg-card);
+             border: 1px solid var(--border-color);
+             border-radius: var(--border-radius);
+             overflow-y: auto; /* Allow scrolling if content overflows */
+        }
+        .control-panel h2 {
+             font-size: 1.1em;
+             margin-bottom: calc(var(--spacing-unit) * 0.75);
+             padding-bottom: calc(var(--spacing-unit) / 3);
+             border-bottom: 1px solid var(--border-color);
+        }
+        .control-group { flex: initial; min-width: initial; /* Override previous flex settings */ }
+        .control-panel label { font-size: 0.85em; }
+        .control-panel input[type="text"], .control-panel select, .control-panel input[type="file"] { font-size: 0.9em; }
+        .control-panel button { width: 100%; font-size: 0.9em; }
+
+        .form-row { display: flex; gap: 0.5em; align-items: flex-end; }
+        .form-row input[type="text"] { flex-grow: 1; }
+
+
+        /* Flash Messages */
+        .flash-messages { list-style: none; padding: 0; margin: 0 var(--spacing-unit) var(--spacing-unit) var(--spacing-unit); }
+        .flash-messages li { padding: var(--spacing-unit); margin-bottom: calc(var(--spacing-unit)/2); border-radius: var(--border-radius); border: 1px solid; font-size: 0.9em; }
+        .flash-success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
+        .flash-error { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
+
+        /* Loading indicator */
+        #loading { display: none; margin-top: var(--spacing-unit); font-weight: 500; color: var(--accent-color); font-size: 0.9em; text-align: center; }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- Header with Title and Active KB Selector -->
+        <header class="main-header">
+            <h1>Kosika Document Processor</h1>
+            <div class="kb-selector-group">
+                <label for="vector_store_id_chat">Active Knowledge Base:</label>
+                 <select id="vector_store_id_chat" name="vector_store_id_chat">
+                     <option value="">Select KB to chat with...</option>
+                     {% for store in vector_stores %}
+                         <option value="{{ store.id }}" {% if session.get('current_vector_store_id') == store.id %}selected{% endif %}>
+                             {{ store.name }} ({{ store.id[-6:] }}) {# Show last 6 chars of ID #}
+                         </option>
+                     {% endfor %}
+                 </select>
+            </div>
+        </header>
+
+         <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <ul class="flash-messages">
+                {% for category, message in messages %}
+                    <li class="flash-{{ category }}">{{ message }}</li>
+                {% endfor %}
+                </ul>
+            {% endif %}
+        {% endwith %}
+
+        <!-- Main Content Area (Chat + Side Panel) -->
+        <div class="main-content">
+
+            <!-- Chat Area -->
+            <section class="chat-area">
+                <div class="chat-container" id="chat-box">
+                    <!-- Chat messages loaded via JS or from session -->
+                    {% for message in session.get('chat_history', []) %}
+                        <div class="chat-message {{ message.role }}-message">
+                            <span class="message-sender">{{ message.role }}</span>
+                            <div class="message-content">{{ message.content }}</div>
+                        </div>
+                    {% endfor %}
+                     <div class="chat-message assistant-message">
+                         <span class="message-sender">Assistant</span>
+                         <div class="message-content">Welcome! Please select or create a Knowledge Base, upload documents, and then ask questions.</div>
+                     </div>
+                </div>
+                 <!-- Input Area -->
+                <div class="chat-input-area">
+                    <input type="text" id="user-message" placeholder="Type your message here...">
+                    <button id="send-button">Send</button>
+                </div>
+            </section>
+
+            <!-- Control Side Panel -->
+            <aside class="control-panel">
+                 <!-- Vector Store Creation -->
+                <div class="control-group">
+                     <h2>Create Knowledge Base</h2>
+                    <form action="{{ url_for('create_vector_store_route') }}" method="POST" class="form-row">
+                        <input type="text" name="store_name" placeholder="New KB Name" required style="flex-grow: 1;">
+                        <button type="submit">Create</button>
+                    </form>
+                </div>
+                <!-- File Upload -->
+                <div class="control-group">
+                     <h2>Upload PDF to Knowledge Base</h2>
+                     <form action="{{ url_for('upload_to_store_route') }}" method="POST" enctype="multipart/form-data">
+                         <div class="form-group">
+                             <label for="vector_store_id_upload">Select KB:</label>
+                             <select name="vector_store_id" id="vector_store_id_upload" required>
+                                 <option value="">-- Select KB --</option>
+                                 {% for store in vector_stores %}
+                                     <option value="{{ store.id }}">{{ store.name }} ({{ store.id[-6:] }})</option>
+                                 {% endfor %}
+                             </select>
+                         </div>
+                          <div class="form-group">
+                             <label for="pdf_file_upload">Select PDF:</label>
+                             <input type="file" name="pdf_file" id="pdf_file_upload" accept=".pdf" required>
+                          </div>
+                         <button type="submit">Upload File</button>
+                     </form>
+                </div>
+                <div id="loading">Processing Upload...</div>
+            </aside>
+
+        </div> {# End Main Content Area #}
+
+    </div> {# End Container #}
+
+    <script>
+        // Ensure DOM is fully loaded before attaching listeners
+        document.addEventListener('DOMContentLoaded', (event) => {
+            console.log("DOM fully loaded and parsed");
+
+            const chatBox = document.getElementById('chat-box');
+            const messageInput = document.getElementById('user-message');
+            const sendButton = document.getElementById('send-button');
+            const vectorStoreSelect = document.getElementById('vector_store_id_chat'); // Selector for chat KB
+            const uploadForm = document.querySelector('form[action*="upload_to_store"]'); // Get upload form
+            const loadingDiv = document.getElementById('loading'); // Get loading indicator
+
+            // Check if elements were found
+            if (!chatBox) console.error("Chat box element not found!");
+            if (!messageInput) console.error("Message input element not found!");
+            if (!sendButton) console.error("Send button element not found!");
+            if (!vectorStoreSelect) console.error("Vector store select element not found!");
+
+            // Function to add message to chatbox
+            function addMessage(sender, text) {
+                try {
+                    console.log(`Adding message - Sender: ${sender}, Text: ${text.substring(0, 50)}...`);
+                    const messageDiv = document.createElement('div');
+                    messageDiv.classList.add('chat-message', `${sender}-message`);
+
+                    const senderSpan = document.createElement('span');
+                    senderSpan.classList.add('message-sender');
+                    senderSpan.textContent = sender;
+
+                    const contentDiv = document.createElement('div');
+                    contentDiv.classList.add('message-content');
+                    contentDiv.textContent = text; // Use textContent to prevent XSS
+
+                    messageDiv.appendChild(senderSpan);
+                    messageDiv.appendChild(contentDiv);
+                    chatBox.appendChild(messageDiv);
+                    // Ensure chatBox is scrolled to bottom *after* content might cause reflow
+                    setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 0);
+                    console.log("Message added successfully.");
+                } catch(e) {
+                    console.error("Error in addMessage:", e);
+                }
+            }
+
+            // Function to handle sending message
+            async function sendChatMessage() {
+                console.log("sendChatMessage function called.");
+                const messageText = messageInput.value.trim();
+                const selectedVectorStoreId = vectorStoreSelect.value;
+                console.log(`Message: "${messageText}", VS ID: "${selectedVectorStoreId}"`);
+
+
+                if (!messageText) {
+                     console.log("Empty message, doing nothing.");
+                     return;
+                }
+                if (!selectedVectorStoreId) {
+                     console.log("No vector store selected.");
+                     addMessage('assistant', 'Error: Please select an Active Knowledge Base for Chat first.');
+                     return;
+                }
+
+                // Display user message immediately
+                addMessage('user', messageText);
+                messageInput.value = ''; // Clear input
+                sendButton.disabled = true; // Disable button while processing
+                const thinkingMsg = '...'; // Simplified indicator text
+                addMessage('assistant', thinkingMsg);
+                let thinkingIndicator = chatBox.lastElementChild; // Get reference to the indicator
+
+                try {
+                    console.log("Sending fetch request to /chat");
+                    const response = await fetch("{{ url_for('chat') }}", {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            message: messageText,
+                            vector_store_id: selectedVectorStoreId
+                        }),
+                    });
+                    console.log("Fetch response received, status:", response.status);
+
+                    // Remove thinking indicator BEFORE processing response
+                    if (thinkingIndicator && thinkingIndicator.textContent.includes(thinkingMsg)) {
+                         console.log("Removing thinking indicator.");
+                         thinkingIndicator.remove();
+                    } else {
+                         console.warn("Could not find thinking indicator to remove.");
+                         // Attempt to remove last assistant message if it might be indicator
+                         let lastAssistantMsg = chatBox.querySelector('.assistant-message:last-child');
+                         if(lastAssistantMsg && lastAssistantMsg.textContent.includes(thinkingMsg)) {
+                             lastAssistantMsg.remove();
+                         }
+                    }
+
+
+                    if (!response.ok) {
+                        let errorText = `HTTP error! Status: ${response.status}`;
+                        try {
+                            const errorData = await response.json();
+                            errorText = errorData.error || errorText;
+                        } catch (e) { console.error("Could not parse error JSON response:", e); }
+                        throw new Error(errorText);
+                    }
+
+                    const data = await response.json();
+                    console.log("Received chat response data:", data);
+                    addMessage('assistant', data.response);
+
+                } catch (error) {
+                     console.error('Chat Error:', error);
+                    // Ensure indicator is removed even on error
+                     if (thinkingIndicator && thinkingIndicator.parentNode === chatBox && thinkingIndicator.textContent.includes(thinkingMsg)) {
+                         console.log("Removing thinking indicator after error.");
+                         thinkingIndicator.remove();
+                     } else {
+                         let lastAssistantMsg = chatBox.querySelector('.assistant-message:last-child');
+                         if(lastAssistantMsg && lastAssistantMsg.textContent.includes(thinkingMsg)) {
+                             lastAssistantMsg.remove();
+                         }
+                     }
+                    addMessage('assistant', `Error: ${error.message}`);
+                } finally {
+                    console.log("Re-enabling send button.");
+                    sendButton.disabled = false; // Re-enable button
+                    messageInput.focus();
+                }
+            }
+
+            // Add loading indicator for file upload form submission
+             if (uploadForm) {
+                 uploadForm.addEventListener('submit', function() {
+                     const fileInput = uploadForm.querySelector('input[type="file"]');
+                     if (fileInput.files.length > 0) {
+                          loadingDiv.textContent = 'Processing Upload... Please wait.';
+                          loadingDiv.style.display = 'block';
+                     }
+                 });
+             }
+
+
+            // Event listeners
+            if(sendButton) {
+                sendButton.addEventListener('click', sendChatMessage);
+                console.log("Send button click listener added.");
+            }
+            if(messageInput) {
+                messageInput.addEventListener('keypress', function(event) {
+                    if (event.key === 'Enter') {
+                        event.preventDefault(); // Prevent default form submission on Enter
+                        sendChatMessage();
+                    }
+                });
+                console.log("Message input keypress listener added.");
+            }
+
+            // Optional: Add logic if needed when chat KB selection changes
+             if(vectorStoreSelect) {
+                 vectorStoreSelect.addEventListener('change', function() {
+                      console.log("Selected KB for chat:", vectorStoreSelect.value);
+                      // Example: Clear chat or load history for this KB
+                      // chatBox.innerHTML = '';
+                      // addMessage('assistant', `Switched to KB: ${vectorStoreSelect.options[vectorStoreSelect.selectedIndex].text}. Ask a question.`);
+                 });
+                 console.log("Vector store select change listener added.");
+             }
+
+            // Scroll chat to bottom on initial load
+            if(chatBox) {
+                chatBox.scrollTop = chatBox.scrollHeight;
+                console.log("Initial scroll to bottom set.");
+            }
+        }); // End DOMContentLoaded
+
+    </script>
+</body>
+</html>

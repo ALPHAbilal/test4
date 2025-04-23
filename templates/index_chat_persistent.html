@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ current_chat_title | default('Agent RAG - Chat') }}</title>
+    <style>
+        :root {
+            /* Color Palette */
+            --bg-dark: #202123; --bg-sidebar: #2e2f32; --bg-chat: #252628;
+            --bg-input: #3a3b3f; --bg-card: #2e2f32; --bg-pre: #1e1f21;
+            --text-light: #ececec; --text-secondary: #b4b4b4; --accent-color: #8e8ea0;
+            --primary-button-bg: #4a4e69; --primary-button-hover-bg: #5a5f80;
+            --border-color: #44474a; --error-color: #f28b82; --success-color: #81c995;
+            --link-color: #a0cff0; --delete-color: #f28b82;
+            /* Layout & Spacing */
+            --sidebar-width: 280px; /* Slightly wider sidebar */
+            --main-content-max-width: 1100px;
+            --border-radius: 6px; --spacing-unit: 1rem;
+            /* Typography */
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-family-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        }
+        *, *::before, *::after { box-sizing: border-box; }
+        html, body { height: 100%; overflow: hidden; }
+        body { font-family: var(--font-family); margin: 0; background-color: var(--bg-dark); color: var(--text-light); display: flex; font-size: 15px; }
+
+        /* --- Sidebar --- */
+        .sidebar { width: var(--sidebar-width); background-color: var(--bg-sidebar); padding: var(--spacing-unit); display: flex; flex-direction: column; border-right: 1px solid var(--border-color); flex-shrink: 0; overflow-y: auto; }
+        .sidebar h2 { font-size: 1.1em; color: var(--text-light); margin: 0 0 var(--spacing-unit) 0; padding-bottom: calc(var(--spacing-unit)/2); border-bottom: 1px solid var(--border-color); font-weight: 600; }
+        .sidebar-section { margin-bottom: calc(var(--spacing-unit) * 1.5); }
+        .sidebar-section h3 { font-size: 1em; color: var(--text-light); margin: 0 0 calc(var(--spacing-unit)) 0; padding-bottom: calc(var(--spacing-unit)/3); border-bottom: 1px solid var(--border-color); font-weight: 500;}
+        .sidebar-section .step-label { display: block; font-size: 0.8em; text-transform: uppercase; color: var(--accent-color); margin-bottom: calc(var(--spacing-unit)/3); font-weight: 600;}
+        .sidebar-section form { display: flex; flex-direction: column; gap: calc(var(--spacing-unit)/1.5); } /* Increased gap */
+        .sidebar-section label { display: block; margin-bottom: calc(var(--spacing-unit) / 3); font-weight: 500; color: var(--text-secondary); font-size: 0.85em; }
+        .sidebar-section input[type="text"], .sidebar-section select, .sidebar-section input[type="file"] { width: 100%; padding: calc(var(--spacing-unit) * 0.5); border: 1px solid var(--border-color); background-color: var(--bg-input); color: var(--text-light); border-radius: var(--border-radius); font-size: 0.9em; }
+        .sidebar-section input[type="file"] { padding: calc(var(--spacing-unit) * 0.4); }
+        .sidebar-section input[type="file"]::file-selector-button { background-color: var(--primary-button-bg); color: var(--text-light); border: none; padding: calc(var(--spacing-unit) * 0.4) var(--spacing-unit); border-radius: calc(var(--border-radius) / 2); cursor: pointer; margin-right: calc(var(--spacing-unit)/2); transition: background-color 0.2s ease; font-size: 0.9em; }
+        .sidebar-section input[type="file"]::file-selector-button:hover { background-color: var(--primary-button-hover-bg); }
+        .sidebar-section button { width: 100%; background-color: var(--primary-button-bg); color: var(--text-light); padding: calc(var(--spacing-unit) * 0.6) var(--spacing-unit); border: none; border-radius: var(--border-radius); cursor: pointer; font-size: 0.9em; font-weight: 500; transition: background-color 0.2s ease; }
+        .sidebar-section button:hover:not(:disabled) { background-color: var(--primary-button-hover-bg); }
+        .sidebar-section button:disabled { background-color: var(--border-color); opacity: 0.6; cursor: not-allowed;}
+        .sidebar-section .form-row { display: flex; gap: 0.5em; align-items: center; }
+        .sidebar-section .form-row input[type="text"] { flex-grow: 1; }
+        .sidebar-section .form-row button { width: auto; }
+
+        .chat-list { list-style: none; padding: 0; margin: 0; }
+        .chat-list-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px; border-radius: var(--border-radius); }
+        .chat-list-item:hover { background-color: rgba(255,255,255, 0.05);} /* Subtle hover */
+        .chat-list-item form { margin: 0; }
+        .chat-list-item a { display: block; padding: calc(var(--spacing-unit)/2.5) calc(var(--spacing-unit)/1.5); color: var(--text-secondary); text-decoration: none; border-radius: var(--border-radius); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.9em; flex-grow: 1; }
+        .chat-list-item a:hover { /* Handled by parent hover */ }
+        .chat-list-item a.active { background-color: var(--primary-button-bg); color: var(--text-light); font-weight: 500; }
+        .delete-button { background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 1.1em; padding: 0 calc(var(--spacing-unit)/2); line-height: 1; opacity: 0.7; flex-shrink: 0; }
+        .delete-button:hover { color: var(--error-color); opacity: 1; }
+
+        /* --- Main Content Wrapper --- */
+        .main-content-wrapper { flex-grow: 1; display: flex; justify-content: center; padding: 0 var(--spacing-unit); overflow-y: hidden; height: 100%; }
+        /* --- Main Area --- */
+        .main-area { width: 100%; max-width: var(--main-content-max-width); height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+        .chat-header { padding: var(--spacing-unit) 0; margin-bottom: var(--spacing-unit); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--spacing-unit); }
+        .chat-header h2 { border: none; margin: 0; padding: 0; font-size: 1.2em; color: var(--text-light); font-weight: 600; flex-shrink: 0; }
+        .chat-header .kb-info { font-size: 0.9em; color: var(--text-secondary); flex-shrink: 0; }
+        .rename-form { display: flex; gap: 0.5em; align-items: center; margin-left: auto; }
+        .rename-form input[type="text"] { font-size: 0.9em; padding: calc(var(--spacing-unit)*0.4); background-color: var(--bg-input); width: 180px; }
+        .rename-form button { font-size: 0.85em; padding: calc(var(--spacing-unit)*0.4) var(--spacing-unit); }
+
+        /* --- Chat Container / Input --- */
+        .chat-container { flex-grow: 1; background-color: transparent; border-radius: 0; padding: 0; overflow-y: auto; margin-bottom: var(--spacing-unit); border: none; }
+        .chat-input-area { display: flex; gap: var(--spacing-unit); padding: var(--spacing-unit); border-top: 1px solid var(--border-color); background-color: var(--bg-dark); position: relative; /* For potential loading indicator */ }
+        .chat-message { margin-bottom: var(--spacing-unit); padding: calc(var(--spacing-unit)*0.8); border-radius: var(--border-radius); line-height: 1.5; word-wrap: break-word; max-width: 85%; }
+        .user-message { background-color: rgba(74, 78, 105, 0.4); border: 1px solid var(--primary-button-bg); margin-left: auto; }
+        .assistant-message { background-color: rgba(46, 47, 50, 0.7); border: 1px solid var(--border-color); margin-right: auto; }
+        .message-sender { font-weight: bold; display: block; margin-bottom: 0.3em; font-size: 0.8em; text-transform: uppercase; color: var(--text-secondary); }
+        .message-content { white-space: pre-wrap; }
+        #user-message { flex-grow: 1; padding: calc(var(--spacing-unit) * 0.75); border: 1px solid var(--border-color); background-color: var(--bg-input); color: var(--text-light); border-radius: var(--border-radius); font-size: 1em; }
+        #send-button { white-space: nowrap; background-color: var(--primary-button-bg); color: var(--text-light); padding: calc(var(--spacing-unit) * 0.75) calc(var(--spacing-unit) * 1.5); border: none; border-radius: var(--border-radius); cursor: pointer; font-size: 1em; font-weight: 500; transition: background-color 0.2s ease; }
+        #send-button:hover:not(:disabled) { background-color: var(--primary-button-hover-bg); }
+        #send-button:disabled { background-color: var(--border-color); cursor: not-allowed; opacity: 0.6;}
+
+        /* Flash Messages */
+        .flash-messages { list-style: none; padding: 0; margin: 0; width: 100%; } /* Take full width */
+        .flash-messages li { padding: var(--spacing-unit); margin-bottom: calc(var(--spacing-unit)); border-radius: var(--border-radius); border: 1px solid; font-size: 0.9em; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        .flash-success { color: #d4edda; background-color: rgba(40, 167, 69, 0.3); border-color: var(--success-color); }
+        .flash-error { color: #f8d7da; background-color: rgba(220, 53, 69, 0.3); border-color: var(--error-color); }
+        .flash-warning { color: #ffeeba; background-color: rgba(255, 193, 7, 0.3); border-color: #ffeeba;}
+
+         /* Loading indicator styles */
+        .loading-overlay {
+            display: none; /* Hidden by default */
+            position: absolute;
+            inset: 0; /* Cover parent */
+            background-color: rgba(46, 47, 50, 0.7); /* Semi-transparent overlay */
+            z-index: 10;
+            border-radius: var(--border-radius); /* Match parent */
+            display: flex; /* Use flex for centering */
+            justify-content: center;
+            align-items: center;
+            color: var(--text-light);
+            font-weight: 500;
+            font-size: 0.9em;
+            text-align: center;
+            padding: 0.5em;
+        }
+        .control-group {
+            position: relative; /* Needed for absolute positioning of overlay */
+        }
+        #selected-files-list { font-size: 0.8em; color: var(--text-secondary); margin-top: calc(var(--spacing-unit) / 2); max-height: 60px; overflow-y: auto; list-style: none; padding-left: 0; }
+        #selected-files-list li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 2px 0; }
+
+        /* Add styles for the sources section */
+        .sources-container {
+            margin-top: calc(var(--spacing-unit) / 2);
+            padding-top: calc(var(--spacing-unit) / 2);
+            border-top: 1px dashed var(--border-color); /* Separator */
+            font-size: 0.85em;
+        }
+        .sources-container summary {
+             cursor: pointer;
+             color: var(--accent-color);
+             font-weight: 500;
+             margin-bottom: calc(var(--spacing-unit) / 3);
+        }
+         .sources-container summary:hover {
+              color: var(--text-light);
+         }
+        .source-item {
+            margin-bottom: calc(var(--spacing-unit) / 2);
+            padding: calc(var(--spacing-unit) / 2);
+            background-color: rgba(0,0,0,0.1); /* Slightly different bg */
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+        .source-item strong {
+             color: var(--text-secondary);
+             font-weight: 500;
+             display: block;
+             margin-bottom: 3px;
+             word-break: break-all; /* Wrap long filenames */
+        }
+        .source-item pre {
+             background-color: var(--bg-pre);
+             font-size: 0.9em; /* Smaller text for chunks */
+             max-height: 150px; /* Limit height of individual chunks */
+             margin: 0;
+             padding: calc(var(--spacing-unit) / 2);
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <h2>Agent RAG</h2>
+
+        <!-- Step 1: Create KB -->
+        <div class="sidebar-section">
+            <h3><span class="step-label">Step 1</span> Create Knowledge Base</h3>
+            <div class="control-group">
+                <form id="create-kb-form" action="{{ url_for('create_vector_store_route') }}" method="POST" class="form-row">
+                    <input type="text" id="new_kb_name" name="store_name" placeholder="New KB Name" required style="flex-grow: 1;">
+                    <button type="submit" id="create-kb-button">Create</button>
+                </form>
+                 <div class="loading-overlay" id="create-kb-loading">Creating...</div>
+            </div>
+        </div>
+
+        <!-- Step 2: Upload to KB -->
+        <div class="sidebar-section">
+             <h3><span class="step-label">Step 2</span> Upload PDF(s) to KB</h3>
+            <div class="control-group">
+                 <form id="upload-form" action="{{ url_for('upload_to_store_route') }}" method="POST" enctype="multipart/form-data">
+                     <div class="form-group">
+                         <label for="vector_store_id_upload">Select KB:</label>
+                         <select name="vector_store_id" id="vector_store_id_upload" required>
+                             <option value="">-- Select KB --</option>
+                             {% for store in vector_stores %}
+                                 <option value="{{ store.id }}">{{ store.name }} ({{ store.id[-6:] }})</option>
+                             {% endfor %}
+                         </select>
+                     </div>
+                      <div class="form-group">
+                         <label for="pdf_files_upload">Select PDF(s):</label>
+                         <input type="file" name="pdf_files[]" id="pdf_files_upload" accept=".pdf" required multiple>
+                         <ul id="selected-files-list"></ul>
+                      </div>
+                     <button type="submit" id="upload-button">Upload Selected File(s)</button>
+                 </form>
+                 <div class="loading-overlay" id="upload-loading">Uploading...</div>
+            </div>
+        </div>
+
+        <!-- Step 3: Select Chat/Start New -->
+         <div class="sidebar-section">
+            <h3><span class="step-label">Step 3</span> Start or Continue Chat</h3>
+             <!-- New Chat Form -->
+             <form action="{{ url_for('new_chat_route') }}" method="POST">
+                 <label for="vector_store_id_new_chat">Start New Chat with KB:</label>
+                 <select name="vector_store_id" id="vector_store_id_new_chat" required title="Select KB for new chat">
+                     <option value="">-- Select KB --</option>
+                      {% for store in vector_stores %}
+                         <option value="{{ store.id }}">{{ store.name }} ({{ store.id[-6:] }})</option>
+                     {% endfor %}
+                 </select>
+                 <button type="submit"> + New Chat</button>
+             </form>
+             <!-- Recent Chats List -->
+            <h4 style="margin-top: var(--spacing-unit); margin-bottom: calc(var(--spacing-unit)/2); font-size:0.9em; color: var(--text-secondary);">Or Continue Recent Chat:</h4>
+            <ul class="chat-list">
+                 {% for chat in chats %}
+                    <li class="chat-list-item">
+                         <a href="{{ url_for('chat_view', chat_id=chat.id) }}"
+                            class="{{ 'active' if chat.id == current_chat_id else '' }}"
+                            title="{{ chat.title }} (KB: {{ chat.vector_store_id[-6:] }})">
+                             {{ chat.title }}
+                         </a>
+                         <form action="{{ url_for('delete_chat_route', chat_id=chat.id) }}" method="POST" style="display: inline;" onsubmit="return confirm('Delete chat: {{ chat.title | escape }}?');">
+                              <button type="submit" class="delete-button" title="Delete Chat"></button>
+                         </form>
+                    </li>
+                 {% else %}
+                    <li style="font-size:0.9em; color: var(--text-secondary); padding-left: calc(var(--spacing-unit)/1.5);">No recent chats.</li>
+                 {% endfor %}
+            </ul>
+        </div>
+    </aside>
+
+    <!-- Main Content Wrapper -->
+    <div class="main-content-wrapper">
+        <!-- Main Area -->
+        <main class="main-area">
+             <header class="chat-header">
+                <h2>{{ current_chat_title | default('Agent RAG Chat') }}</h2>
+                 {% if current_chat_id %}
+                     <span class="kb-info" title="Knowledge Base ID: {{ current_vector_store_id }}">Using KB: {{ current_vector_store_id[-6:] }}</span>
+                     <form class="rename-form" action="{{ url_for('rename_chat_route', chat_id=current_chat_id) }}" method="POST">
+                          <input type="text" name="new_title" placeholder="Rename chat..." required value="{{ current_chat_title }}">
+                          <button type="submit">Rename</button>
+                     </form>
+                 {% endif %}
+             </header>
+
+              <!-- Flash Messages -->
+             {% with messages = get_flashed_messages(with_categories=true) %}
+                 {% if messages %}
+                     <ul class="flash-messages">
+                     {% for category, message in messages %}
+                         <li class="flash-{{ category }}">{{ message }}</li>
+                     {% endfor %}
+                     </ul>
+                 {% endif %}
+             {% endwith %}
+
+
+            <div class="chat-container" id="chat-box">
+                <!-- Messages for the currently selected chat -->
+                {% if current_chat_id %}
+                     {% for message in current_chat_messages %}
+                        <div class="chat-message {{ message.role }}-message">
+                            <span class="message-sender">{{ message.role }}</span>
+                            <div class="message-content">{{ message.content }}</div>
+                        </div>
+                     {% else %}
+                         <div class="chat-message assistant-message">
+                             <span class="message-sender">Assistant</span>
+                             <div class="message-content">This chat is empty. Ask a question about the documents in the Knowledge Base ({{ current_vector_store_id[-6:] }})!</div>
+                         </div>
+                     {% endfor %}
+                {% else %}
+                    <div class="chat-message assistant-message">
+                        <span class="message-sender">Assistant</span>
+                        <div class="message-content">Welcome! Please select a chat from the sidebar or start a new one using a Knowledge Base (KB). You may need to create a KB and upload documents first using the options on the left.</div>
+                    </div>
+                {% endif %}
+            </div>
+
+             <!-- Input Area -->
+            <div class="chat-input-area">
+                <input type="text" id="user-message" placeholder="Ask a question about the documents in the active KB..." {% if not current_chat_id %}disabled{% endif %}>
+                <button id="send-button" {% if not current_chat_id %}disabled{% endif %}>Send</button>
+            </div>
+        </main>
+    </div> {# End Main Content Wrapper #}
+
+
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            // --- Element References ---
+            const createKbForm = document.getElementById('create-kb-form');
+            const createKbLoading = document.getElementById('create-kb-loading');
+            const createKbButton = document.getElementById('create-kb-button');
+            const uploadForm = document.getElementById('upload-form');
+            const uploadLoading = document.getElementById('upload-loading');
+            const uploadButton = document.getElementById('upload-button');
+            const fileInput = document.getElementById('pdf_files_upload');
+            const fileNamesList = document.getElementById('selected-files-list');
+            const chatBox = document.getElementById('chat-box');
+            const messageInput = document.getElementById('user-message');
+            const sendButton = document.getElementById('send-button');
+            const currentChatId = "{{ current_chat_id | default('') }}";
+
+            // --- Loading Indicators & Button Disabling ---
+            function showLoading(overlayElement, buttonElement) {
+                 if (overlayElement) overlayElement.style.display = 'flex';
+                 if (buttonElement) buttonElement.disabled = true;
+            }
+            function hideLoading(overlayElement, buttonElement) {
+                if (overlayElement) overlayElement.style.display = 'none';
+                if (buttonElement) buttonElement.disabled = false;
+            }
+
+            if (createKbForm && createKbLoading && createKbButton) {
+                createKbForm.addEventListener('submit', (e) => {
+                    const nameInput = createKbForm.querySelector('input[name=store_name]');
+                    if (nameInput && nameInput.value.trim()) {
+                         showLoading(createKbLoading, createKbButton);
+                    } else {
+                         // Optionally add client-side validation message
+                         // e.preventDefault(); // Stop submission if needed
+                    }
+                 });
+            }
+             if (uploadForm && uploadLoading && uploadButton && fileInput) {
+                 uploadForm.addEventListener('submit', (e) => {
+                     const kbSelect = uploadForm.querySelector('select[name=vector_store_id]');
+                     if (fileInput.files.length > 0 && kbSelect && kbSelect.value) {
+                          showLoading(uploadLoading, uploadButton);
+                     } else {
+                         // Optionally add client-side validation message
+                         // e.preventDefault(); // Stop submission if needed
+                     }
+                  });
+                 // Show selected file names
+                  fileInput.addEventListener('change', () => {
+                      fileNamesList.innerHTML = ''; // Clear previous list
+                      if (fileInput.files.length > 0) {
+                           Array.from(fileInput.files).forEach(file => {
+                               const li = document.createElement('li');
+                               li.textContent = file.name;
+                               fileNamesList.appendChild(li);
+                           });
+                      }
+                   });
+             }
+
+             // Hide loading indicators when page fully loads (after potential redirect)
+             window.addEventListener('pageshow', (event) => {
+                  // Check if the page was loaded from bfcache (back/forward cache)
+                  // if (event.persisted) {
+                  //      // Might need to re-enable buttons if persisted state had them disabled
+                  // }
+                  hideLoading(createKbLoading, createKbButton);
+                  hideLoading(uploadLoading, uploadButton);
+              });
+
+
+            // --- Chat Functions (Keep addMessage, sendChatMessage as before) ---
+            function addMessage(sender, text, sources = [], isLoading = false) {
+                if (!chatBox) return null;
+                const messageDiv = document.createElement('div');
+                messageDiv.classList.add('chat-message', `${sender}-message`);
+                if (isLoading) messageDiv.classList.add('loading-indicator');
+
+                const senderSpan = document.createElement('span');
+                senderSpan.classList.add('message-sender');
+                senderSpan.textContent = sender;
+
+                const contentDiv = document.createElement('div');
+                contentDiv.classList.add('message-content');
+                contentDiv.textContent = text; // Add main response text
+
+                messageDiv.appendChild(senderSpan);
+                messageDiv.appendChild(contentDiv);
+
+                // --- Add Sources Section (if sources exist) ---
+                if (sources && sources.length > 0) {
+                    const sourcesContainer = document.createElement('details');
+                    sourcesContainer.classList.add('sources-container');
+
+                    const summary = document.createElement('summary');
+                    summary.textContent = `Sources (${sources.length})`;
+                    sourcesContainer.appendChild(summary);
+
+                    sources.forEach(source => {
+                        const itemDiv = document.createElement('div');
+                        itemDiv.classList.add('source-item');
+
+                        const title = document.createElement('strong');
+                        title.textContent = `📄 ${source.filename || 'Unknown Source'}`;
+                        if(source.score) {
+                             title.textContent += ` (Score: ${source.score.toFixed(2)})`;
+                        }
+                        itemDiv.appendChild(title);
+
+                        const contentPre = document.createElement('pre');
+                        contentPre.textContent = source.content || 'No content preview.';
+                        itemDiv.appendChild(contentPre);
+
+                        sourcesContainer.appendChild(itemDiv);
+                    });
+                    messageDiv.appendChild(sourcesContainer); // Add sources to the message div
+                }
+                // --- End Sources Section ---
+
+                chatBox.appendChild(messageDiv);
+                setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 50);
+                return messageDiv; // Return the main message div
+            }
+
+            async function sendChatMessage() {
+                 if (!messageInput || !sendButton || !currentChatId) return; // Exit if elements missing or no active chat
+
+                 const messageText = messageInput.value.trim();
+                 if (!messageText) return;
+
+                 addMessage('user', messageText);
+                 messageInput.value = '';
+                 sendButton.disabled = true; // Disable send button
+                 const thinkingIndicator = addMessage('assistant', '...', [], true); // Add thinking indicator without sources
+
+                 try {
+                     const apiUrl = `{{ url_for('chat_api', chat_id='CHAT_ID_PLACEHOLDER') }}`.replace('CHAT_ID_PLACEHOLDER', currentChatId);
+                     const response = await fetch(apiUrl, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ message: messageText }), });
+                     if (thinkingIndicator) thinkingIndicator.remove(); // Remove indicator
+
+                     if (!response.ok) {
+                         let errorText = `HTTP error! Status: ${response.status}`;
+                         try { const errorData = await response.json(); errorText = errorData.error || errorText; } catch(e){}
+                         throw new Error(errorText);
+                     }
+                     const data = await response.json();
+                     console.log("Received chat response data:", data);
+                     // Pass both response text AND retrieved sources to addMessage
+                     addMessage('assistant', data.response, data.retrieved_sources || [], false); // NEW: Pass sources
+                 } catch (error) {
+                     if (thinkingIndicator) thinkingIndicator.remove();
+                     console.error('Chat Error:', error);
+                     addMessage('assistant', `Error: ${error.message}`); // Error message doesn't have sources
+                 } finally {
+                     sendButton.disabled = false; // Re-enable send button
+                     messageInput.focus();
+                 }
+            }
+
+            // Event listeners
+            if (sendButton) sendButton.addEventListener('click', sendChatMessage);
+            if (messageInput) messageInput.addEventListener('keypress', function(event) { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendChatMessage(); } });
+
+            // Scroll chat to bottom on initial load
+            if(chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+
+        }); // End DOMContentLoaded
+    </script>
+</body>
+</html>

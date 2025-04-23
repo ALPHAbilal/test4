@@ -1,0 +1,1716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced RAG System with Agents</title>
+    <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --accent-color: #e74c3c;
+            --light-bg: #f9f9f9;
+            --dark-bg: #2c3e50;
+            --success-color: #27ae60;
+            --warning-color: #f39c12;
+            --error-color: #e74c3c;
+            --info-color: #3498db;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            background-color: var(--light-bg);
+        }
+
+        header {
+            background-color: var(--dark-bg);
+            color: white;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .panel {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .left-panel {
+            flex: 1;
+            min-width: 300px;
+        }
+
+        .right-panel {
+            flex: 2;
+            min-width: 400px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .agent-panel {
+            flex: 1;
+            min-width: 300px;
+            max-height: 800px;
+            overflow-y: auto;
+        }
+
+        h1, h2, h3, h4 {
+            color: var(--secondary-color);
+        }
+
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            background: #eee;
+            cursor: pointer;
+            border-radius: 4px 4px 0 0;
+            margin-right: 5px;
+        }
+
+        .tab.active {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+
+        input[type="file"],
+        input[type="text"],
+        textarea {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #f9f9f9;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #2980b9;
+        }
+
+        button:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+
+        .success {
+            color: var(--success-color);
+            font-weight: bold;
+        }
+
+        .error {
+            color: var(--error-color);
+            font-weight: bold;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #f1f1f1;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .file-actions button {
+            padding: 5px 10px;
+            font-size: 14px;
+        }
+
+        .file-name {
+            font-weight: bold;
+        }
+
+        .response-content {
+            white-space: pre-wrap;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loading-spinner {
+            border: 6px solid #f3f3f3;
+            border-top: 6px solid var(--primary-color);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+            margin-bottom: 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .stream-option {
+            margin-bottom: 15px;
+        }
+
+        .agent-insights {
+            border-left: 4px solid var(--primary-color);
+            padding-left: 15px;
+            margin-top: 20px;
+        }
+
+        .agent-workflow {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .agent-step {
+            border-left: 3px solid var(--info-color);
+            padding-left: 10px;
+            margin-bottom: 10px;
+        }
+
+        .confidence-indicator {
+            height: 10px;
+            background: #eee;
+            border-radius: 5px;
+            margin-top: 5px;
+            overflow: hidden;
+        }
+
+        .confidence-indicator .level {
+            height: 100%;
+            background: var(--primary-color);
+            transition: width 0.5s;
+        }
+
+        .extraction-results {
+            margin-top: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+
+        th, td {
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        .agent-activity {
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .conversation-option {
+            margin-bottom: 15px;
+        }
+
+        .user-message {
+            text-align: right;
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 10px;
+            padding: 10px;
+            margin: 10px 0;
+            margin-left: auto;
+            width: 80%;
+        }
+
+        .assistant-message {
+            text-align: left;
+            background-color: #f1f1f1;
+            border-radius: 10px;
+            padding: 10px;
+            margin: 10px 0;
+            width: 80%;
+        }
+
+        .mode-switch {
+            display: flex;
+            justify-content: center;
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .mode-option {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin: 0 10px;
+        }
+
+        .mode-option.active {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        .agent-icon {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            margin-right: 8px;
+            background-color: var(--info-color);
+            border-radius: 50%;
+            text-align: center;
+            color: white;
+            line-height: 24px;
+            font-size: 14px;
+        }
+
+        .accordion {
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .accordion-header {
+            padding: 15px;
+            background-color: #f5f5f5;
+            cursor: pointer;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .accordion-content {
+            padding: 15px;
+            display: none;
+            border-top: 1px solid #ddd;
+        }
+
+        .extraction-field {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .extraction-value {
+            font-weight: bold;
+        }
+
+        .section-toggle {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .section-toggle .arrow {
+            margin-right: 10px;
+            transition: transform 0.3s;
+        }
+
+        .section-toggle.collapsed .arrow {
+            transform: rotate(-90deg);
+        }
+
+        .section-content {
+            transition: max-height 0.5s;
+            overflow: hidden;
+        }
+
+        .section-content.collapsed {
+            max-height: 0;
+        }
+
+        /* Enhanced Agent Activity Styling */
+        .agent-activity-card {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+
+        .agent-activity-header {
+            display: flex;
+            align-items: center;
+            padding: 12px 16px;
+            background-color: #f9f9f9;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .agent-activity-header:hover {
+            background-color: #f0f0f0;
+        }
+
+        .agent-details {
+            flex-grow: 1;
+        }
+
+        .agent-title {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .agent-action {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .agent-timestamp {
+            font-size: 0.8em;
+            color: #999;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+
+        .toggle-icon {
+            font-size: 12px;
+            color: #666;
+            transition: transform 0.3s;
+        }
+
+        .agent-activity-details {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            background-color: white;
+        }
+
+        .activity-section {
+            padding: 12px 16px;
+            border-top: 1px solid #eee;
+        }
+
+        .section-header {
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #444;
+        }
+
+        .json-container {
+            background-color: #f8f8f8;
+            border-radius: 4px;
+            overflow: auto;
+            max-height: 300px;
+        }
+
+        .formatted-json {
+            padding: 12px;
+            margin: 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+        }
+
+        /* JSON Syntax Highlighting */
+        .json-key {
+            color: #0451a5;
+        }
+
+        .json-string {
+            color: #a31515;
+        }
+
+        .json-number {
+            color: #098658;
+        }
+
+        .json-boolean {
+            color: #0000ff;
+        }
+
+        .json-null {
+            color: #af00db;
+        }
+
+        /* Results Display Enhancement */
+        .agent-results-container {
+            margin-top: 20px;
+        }
+
+        .results-section {
+            margin-bottom: 24px;
+        }
+
+        .results-heading {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 8px;
+        }
+
+        .results-content {
+            background-color: white;
+            padding: 16px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .confidence-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+            background-color: #3498db;
+            margin-left: 8px;
+        }
+
+        .high-confidence {
+            background-color: #2ecc71;
+        }
+
+        .medium-confidence {
+            background-color: #f39c12;
+        }
+
+        .low-confidence {
+            background-color: #e74c3c;
+        }
+
+        .key-value-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+
+        .key-value-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .key-value-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .key-column {
+            font-weight: bold;
+            width: 30%;
+            color: #555;
+        }
+
+        .value-column {
+            width: 60%;
+        }
+
+        .confidence-column {
+            width: 10%;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Advanced RAG System with Multi-Agent Processing</h1>
+    </header>
+
+    <div class="mode-switch">
+        <div class="mode-option active" data-mode="standard">Standard RAG</div>
+        <div class="mode-option" data-mode="agent">Agent-Based Processing</div>
+    </div>
+
+    <div class="container">
+        <div class="left-panel panel">
+            <div class="tabs">
+                <div class="tab active" data-tab="file-upload">File Upload</div>
+                <div class="tab" data-tab="text-upload">Text Upload</div>
+            </div>
+
+            <div class="tab-content active" id="file-upload">
+                <h2>Upload Files</h2>
+                <form id="upload-form">
+                    <label for="file-input">Select a file to upload:</label>
+                    <input type="file" id="file-input" accept=".txt,.pdf,.md,.csv">
+                    <button type="submit" id="upload-button">Upload</button>
+                </form>
+
+                <div id="upload-status"></div>
+
+                <div class="file-list">
+                    <h3>Uploaded Files</h3>
+                    <div id="file-list-container">
+                        <p>No files uploaded yet.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="text-upload">
+                <h2>Create File from Text</h2>
+                <form id="text-form">
+                    <label for="filename-input">Filename (with extension):</label>
+                    <input type="text" id="filename-input" placeholder="doc1.txt" style="margin-bottom: 10px;">
+
+                    <label for="content-input">File Content:</label>
+                    <textarea id="content-input" placeholder="Enter the content for your file here..."></textarea>
+
+                    <button type="submit" id="text-upload-button">Create File</button>
+                </form>
+
+                <div id="text-upload-status"></div>
+            </div>
+        </div>
+
+        <!-- Standard RAG Mode -->
+        <div class="right-panel panel" id="standard-mode">
+            <div class="query-panel">
+                <h2>Query Assistant</h2>
+                <form id="query-form">
+                    <label for="query-input">Enter your question:</label>
+                    <textarea id="query-input" placeholder="What's in paragraph 3 of the document?"></textarea>
+
+                    <div class="stream-option">
+                        <input type="checkbox" id="stream-checkbox">
+                        <label for="stream-checkbox" style="display: inline;">Stream response</label>
+                    </div>
+
+                    <div class="conversation-option">
+                        <input type="checkbox" id="new-conversation-checkbox">
+                        <label for="new-conversation-checkbox" style="display: inline;">Start new conversation</label>
+                        <button type="button" id="view-history-button" style="margin-left: 10px; background-color: #7f8c8d;">View History</button>
+                    </div>
+
+                    <button type="submit" id="query-button">Submit Query</button>
+                </form>
+            </div>
+
+            <div class="panel">
+                <h2>Assistant Response</h2>
+                <div id="response-container">
+                    <p>Submit a query to see the response here.</p>
+                </div>
+            </div>
+
+            <div class="conversation-history panel" style="display: none;">
+                <h2>Conversation History</h2>
+                <div id="history-container">
+                    <p>No conversation history yet.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Agent-Based Mode -->
+        <div class="right-panel panel" id="agent-mode" style="display: none;">
+            <div class="query-panel">
+                <h2>Intelligent Document Processing</h2>
+                <form id="agent-form">
+                    <label for="agent-file-select">Select a file to process:</label>
+                    <select id="agent-file-select" style="width: 100%; padding: 10px; margin-bottom: 20px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="">-- Select a file --</option>
+                    </select>
+
+                    <label for="agent-query-input">Enter specific question (optional):</label>
+                    <textarea id="agent-query-input" placeholder="What are the key terms in this document?"></textarea>
+
+                    <button type="submit" id="agent-process-button">Process with Agents</button>
+                </form>
+            </div>
+
+            <div class="panel">
+                <h2>Agent Processing Results</h2>
+                <div id="agent-status" class="loading" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <p>Processing document with intelligent agents...</p>
+                </div>
+
+                <div id="agent-results-container">
+                    <p>Select a file and press "Process with Agents" to see intelligent analysis.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Agent Activity Panel -->
+        <div class="agent-panel panel" style="display: none;" id="agent-activity-panel">
+            <h2>Agent Activity</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <button id="refresh-activity-button" class="refresh-button">
+                    <span style="margin-right: 5px;">↻</span> Refresh Activity
+                </button>
+                <div class="activity-filter">
+                    <label for="agent-filter" style="margin-right: 5px;">Filter:</label>
+                    <select id="agent-filter" onchange="filterAgentActivity()">
+                        <option value="all">All Agents</option>
+                        <option value="classify">Classification</option>
+                        <option value="extract">Extraction</option>
+                        <option value="analyze">Analysis</option>
+                        <option value="validate">Validation</option>
+                        <option value="answer">Question Answering</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="agent-activity-container">
+                <p>No agent activity yet.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Dynamic API base URL detection
+        const API_BASE_URL = window.location.origin;
+        const uploadedFiles = [];
+        let currentMode = "standard";  // Default mode
+
+        // Mode switching
+        document.querySelectorAll('.mode-option').forEach(option => {
+            option.addEventListener('click', () => {
+                // Update active state
+                document.querySelectorAll('.mode-option').forEach(opt => opt.classList.remove('active'));
+                option.classList.add('active');
+
+                // Get the mode
+                const mode = option.getAttribute('data-mode');
+                currentMode = mode;
+
+                // Show/hide appropriate panels
+                if (mode === "standard") {
+                    document.getElementById('standard-mode').style.display = 'flex';
+                    document.getElementById('agent-mode').style.display = 'none';
+                    document.getElementById('agent-activity-panel').style.display = 'none';
+                } else {
+                    document.getElementById('standard-mode').style.display = 'none';
+                    document.getElementById('agent-mode').style.display = 'flex';
+                    document.getElementById('agent-activity-panel').style.display = 'block';
+                    refreshAgentActivity();
+                }
+            });
+        });
+
+        // Tab switching functionality
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                // Remove active class from all tabs and contents
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+                // Add active class to clicked tab
+                tab.classList.add('active');
+
+                // Show corresponding content
+                const tabId = tab.getAttribute('data-tab');
+                document.getElementById(tabId).classList.add('active');
+            });
+        });
+
+        // File Upload Form
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fileInput = document.getElementById('file-input');
+            const uploadStatus = document.getElementById('upload-status');
+
+            if (!fileInput.files.length) {
+                uploadStatus.innerHTML = '<p class="error">Please select a file first.</p>';
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            uploadStatus.innerHTML = `
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <p>Uploading ${file.name}...</p>
+                </div>
+            `;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.status === 'success') {
+                    uploadStatus.innerHTML = `<p class="success">File "${file.name}" uploaded successfully!</p>`;
+                    uploadedFiles.push({
+                        name: file.name,
+                        path: data.path
+                    });
+                    updateFileList();
+                    updateAgentFileSelect();
+                } else {
+                    uploadStatus.innerHTML = `<p class="error">Error: ${data.message || 'Failed to upload file'}</p>`;
+                    console.error('Upload failed:', data);
+                }
+            } catch (error) {
+                uploadStatus.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+                console.error('Upload error:', error);
+            }
+
+            // Reset file input
+            fileInput.value = '';
+        });
+
+        // Text Upload Form
+        document.getElementById('text-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const filenameInput = document.getElementById('filename-input');
+            const contentInput = document.getElementById('content-input');
+            const textUploadStatus = document.getElementById('text-upload-status');
+
+            if (!filenameInput.value) {
+                textUploadStatus.innerHTML = '<p class="error">Please enter a filename.</p>';
+                return;
+            }
+
+            if (!contentInput.value) {
+                textUploadStatus.innerHTML = '<p class="error">Please enter some content.</p>';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('filename', filenameInput.value);
+            formData.append('content', contentInput.value);
+
+            textUploadStatus.innerHTML = `
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <p>Creating file ${filenameInput.value}...</p>
+                </div>
+            `;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/upload-text`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.status === 'success') {
+                    textUploadStatus.innerHTML = `<p class="success">File "${filenameInput.value}" created successfully!</p>`;
+                    uploadedFiles.push({
+                        name: filenameInput.value,
+                        path: data.path
+                    });
+                    updateFileList();
+                    updateAgentFileSelect();
+                } else {
+                    textUploadStatus.innerHTML = `<p class="error">Error: ${data.message || 'Failed to create file'}</p>`;
+                    console.error('Text upload failed:', data);
+                }
+            } catch (error) {
+                textUploadStatus.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+                console.error('Text upload error:', error);
+            }
+
+            // Reset inputs
+            filenameInput.value = '';
+            contentInput.value = '';
+        });
+
+        // Standard Query Form
+        document.getElementById('query-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const queryInput = document.getElementById('query-input');
+            const streamCheckbox = document.getElementById('stream-checkbox');
+            const newConversationCheckbox = document.getElementById('new-conversation-checkbox');
+            const responseContainer = document.getElementById('response-container');
+            const queryButton = document.getElementById('query-button');
+
+            if (!queryInput.value) {
+                responseContainer.innerHTML = '<p class="error">Please enter a query.</p>';
+                return;
+            }
+
+            // Disable button during query
+            queryButton.disabled = true;
+
+            responseContainer.innerHTML = `
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <p>Processing query...</p>
+                </div>
+            `;
+
+            const formData = new FormData();
+            formData.append('question', queryInput.value);
+            formData.append('new_conversation', newConversationCheckbox.checked);
+
+            try {
+                if (streamCheckbox.checked) {
+                    // Stream response with error handling and retry logic
+                    responseContainer.innerHTML = '<div class="response-content"></div>';
+                    const responseContent = responseContainer.querySelector('.response-content');
+
+                    // Exponential backoff parameters for retries
+                    const maxRetries = 3;
+                    const initialRetryDelay = 1000; // 1 second
+                    const maxRetryDelay = 5000; // 5 seconds
+                    const retryFactor = 2;
+
+                    let retryCount = 0;
+                    let success = false;
+
+                    while (retryCount <= maxRetries && !success) {
+                        try {
+                            if (retryCount > 0) {
+                                // Calculate delay with exponential backoff
+                                const delay = Math.min(initialRetryDelay * Math.pow(retryFactor, retryCount - 1), maxRetryDelay);
+                                // Add a message about retrying
+                                responseContent.textContent += `\n[Retrying connection (${retryCount}/${maxRetries})...]\n`;
+                                // Wait before retrying
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                            }
+
+                            const response = await fetch(`${API_BASE_URL}/stream`, {
+                                method: 'POST',
+                                body: formData
+                            });
+
+                            if (!response.ok) {
+                                throw new Error(`Server responded with status: ${response.status}`);
+                            }
+
+                            const reader = response.body.getReader();
+                            const decoder = new TextDecoder();
+
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+
+                                const text = decoder.decode(value);
+                                responseContent.textContent += text;
+
+                                // Auto-scroll to bottom
+                                responseContainer.scrollTop = responseContainer.scrollHeight;
+                            }
+
+                            // Mark as successful to exit retry loop
+                            success = true;
+
+                        } catch (streamError) {
+                            console.error(`Streaming error (attempt ${retryCount + 1}):`, streamError);
+                            retryCount++;
+
+                            // If we've exhausted all retries, show the error
+                            if (retryCount > maxRetries) {
+                                responseContent.textContent += `\n\nError: ${streamError.message}\nFailed to complete streaming after ${maxRetries} attempts.`;
+                            }
+                        }
+                    }
+
+                    // After streaming completes (successfully or with max retries), update conversation history
+                    updateConversationHistory();
+                } else {
+                    // Regular response with exponential backoff for retries
+                    const maxRetries = 3;
+                    const initialRetryDelay = 1000; // 1 second
+                    const maxRetryDelay = 5000; // 5 seconds
+                    const retryFactor = 2;
+
+                    let retryCount = 0;
+                    let success = false;
+
+                    while (retryCount <= maxRetries && !success) {
+                        try {
+                            if (retryCount > 0) {
+                                // Calculate delay with exponential backoff
+                                const delay = Math.min(initialRetryDelay * Math.pow(retryFactor, retryCount - 1), maxRetryDelay);
+                                // Show retry message
+                                responseContainer.innerHTML = `
+                                    <div class="loading">
+                                        <div class="loading-spinner"></div>
+                                        <p>Retrying query (${retryCount}/${maxRetries})...</p>
+                                    </div>
+                                `;
+                                // Wait before retrying
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                            }
+
+                            const response = await fetch(`${API_BASE_URL}/query`, {
+                                method: 'POST',
+                                body: formData
+                            });
+
+                            const data = await response.json();
+
+                            if (response.ok) {
+                                responseContainer.innerHTML = `
+                                    <div class="response-content">${data.response}</div>
+                                `;
+                                // Update conversation history
+                                updateConversationHistory();
+                                success = true;
+                            } else {
+                                throw new Error(data.detail || 'Failed to get response');
+                            }
+                        } catch (queryError) {
+                            console.error(`Query error (attempt ${retryCount + 1}):`, queryError);
+                            retryCount++;
+
+                            // If we've exhausted all retries, show the error
+                            if (retryCount > maxRetries) {
+                                responseContainer.innerHTML = `<p class="error">Error: ${queryError.message}<br>Failed after ${maxRetries} attempts.</p>`;
+                                console.error('Query failed after all retries');
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                responseContainer.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+                console.error('Query error:', error);
+            }
+
+            // Reset new conversation checkbox
+            newConversationCheckbox.checked = false;
+
+            // Re-enable button
+            queryButton.disabled = false;
+        });
+
+        // Agent Processing Form
+        document.getElementById('agent-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fileSelect = document.getElementById('agent-file-select');
+            const queryInput = document.getElementById('agent-query-input');
+            const resultsContainer = document.getElementById('agent-results-container');
+            const agentButton = document.getElementById('agent-process-button');
+            const agentStatus = document.getElementById('agent-status');
+
+            if (!fileSelect.value) {
+                resultsContainer.innerHTML = '<p class="error">Please select a file to process.</p>';
+                return;
+            }
+
+            // Disable button during processing
+            agentButton.disabled = true;
+
+            // Show loading status
+            agentStatus.style.display = 'block';
+            resultsContainer.innerHTML = '';
+
+            const formData = new FormData();
+            formData.append('file_path', fileSelect.value);
+            if (queryInput.value) {
+                formData.append('query', queryInput.value);
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/process-with-agents`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.status === 'success') {
+                    // Successful processing
+                    displayAgentResults(data.result, resultsContainer);
+                    // Update agent activity after processing
+                    setTimeout(refreshAgentActivity, 1000);
+                } else if (response.ok && data.status === 'processing') {
+                    // Background processing job
+                    pollJobStatus(data.job_id, resultsContainer);
+                } else {
+                    // Error
+                    agentStatus.style.display = 'none';
+                    resultsContainer.innerHTML = `<p class="error">Error: ${data.message || 'Failed to process document'}</p>`;
+                    console.error('Agent processing failed:', data);
+                }
+            } catch (error) {
+                agentStatus.style.display = 'none';
+                resultsContainer.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+                console.error('Agent processing error:', error);
+            }
+
+            // Re-enable button
+            agentButton.disabled = false;
+        });
+
+        // Poll job status for background processing with exponential backoff
+        async function pollJobStatus(jobId, resultsContainer) {
+            const agentStatus = document.getElementById('agent-status');
+            const maxAttempts = 60; // Maximum number of polling attempts
+            const maxWaitTime = 300000; // 5 minutes in milliseconds
+            const initialDelay = 1000; // Start with 1 second delay
+            const maxDelay = 30000; // Maximum 30 seconds between polls
+            const factor = 1.5; // Exponential factor
+            const jitterFactor = 0.2; // Add 20% random jitter
+
+            let attempts = 0;
+            let startTime = Date.now();
+            let currentDelay = initialDelay;
+            let timeoutId = null;
+
+            // Function to calculate next delay with exponential backoff and jitter
+            function getNextDelay() {
+                // Calculate base delay using exponential backoff
+                const baseDelay = Math.min(currentDelay * factor, maxDelay);
+
+                // Add jitter (random variation to prevent synchronized retries)
+                const jitterAmount = baseDelay * jitterFactor;
+                const delay = baseDelay + (Math.random() * 2 - 1) * jitterAmount;
+
+                // Update current delay for next iteration
+                currentDelay = baseDelay;
+
+                return Math.max(initialDelay, Math.min(delay, maxDelay));
+            }
+
+            // Function to perform a single poll
+            async function doPoll() {
+                attempts++;
+                const elapsedTime = Date.now() - startTime;
+
+                // Check if we've exceeded the maximum wait time
+                if (elapsedTime >= maxWaitTime || attempts >= maxAttempts) {
+                    agentStatus.style.display = 'none';
+                    resultsContainer.innerHTML = `<p class="error">Processing timed out after ${Math.round(elapsedTime/1000)} seconds. The job may still be running in the background.</p>`;
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE_URL}/agent-job/${jobId}`);
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        if (data.status === 'completed') {
+                            // Job completed
+                            agentStatus.style.display = 'none';
+                            displayAgentResults(data.result, resultsContainer);
+                            // Update agent activity after processing
+                            setTimeout(refreshAgentActivity, 1000);
+                            return; // Stop polling
+                        } else if (data.status === 'error') {
+                            // Job failed
+                            agentStatus.style.display = 'none';
+                            resultsContainer.innerHTML = `<p class="error">Error: ${data.error || 'Failed to process document'}</p>`;
+                            return; // Stop polling
+                        }
+                        // else still processing, continue polling with backoff
+                        const nextDelay = getNextDelay();
+                        console.log(`Job still processing. Next poll in ${nextDelay/1000} seconds (attempt ${attempts})`);
+                        timeoutId = setTimeout(doPoll, nextDelay);
+                    } else {
+                        // Error checking job status
+                        agentStatus.style.display = 'none';
+                        resultsContainer.innerHTML = `<p class="error">Error checking job status: ${data.message || 'Unknown error'}</p>`;
+                        return; // Stop polling
+                    }
+                } catch (error) {
+                    console.error('Error polling job status:', error);
+
+                    // For network errors, we might want to retry with a shorter delay
+                    const nextDelay = Math.min(currentDelay, 5000); // Cap retry delay for errors
+                    console.log(`Error during polling. Retrying in ${nextDelay/1000} seconds (attempt ${attempts})`);
+                    timeoutId = setTimeout(doPoll, nextDelay);
+                }
+            }
+
+            // Start the first poll
+            doPoll();
+        }
+
+        // Function to display agent processing results
+        function displayAgentResults(result, container) {
+            // If result is a string (raw text response)
+            if (typeof result === 'string') {
+                container.innerHTML = `<div class="response-content">${result}</div>`;
+                return;
+            }
+
+            // Check if we have proper workflow data
+            if (!result || (!result.processing_results && !result.result)) {
+                container.innerHTML = `
+                    <div class="response-content">
+                        <h3>Processing Results</h3>
+                        <p>${result?.result || 'No detailed results available'}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Start building the enhanced UI
+            let html = '<div class="agent-results-container">';
+
+            // Add summary section
+            html += `
+                <div class="results-section">
+                    <div class="results-heading">Summary</div>
+                    <div class="results-content">
+                        <p>${result.result || 'No summary available'}</p>
+                    </div>
+                </div>
+            `;
+
+            // Get processing results
+            const processingResults = result.processing_results || {};
+
+            // Document Classification Section
+            if (processingResults.classify_document) {
+                const classification = processingResults.classify_document;
+                const confidence = classification.confidence || 0;
+                const confidenceClass = confidence >= 0.8 ? 'high-confidence' :
+                                    confidence >= 0.5 ? 'medium-confidence' : 'low-confidence';
+
+                html += `
+                    <div class="results-section">
+                        <div class="results-heading">Document Classification</div>
+                        <div class="results-content">
+                            <div class="confidence-indicator-wrapper">
+                                <div class="confidence-label">Classification Confidence:
+                                    <span class="confidence-badge ${confidenceClass}">${Math.round(confidence * 100)}%</span>
+                                </div>
+                                <div class="confidence-indicator">
+                                    <div class="level" style="width: ${confidence * 100}%"></div>
+                                </div>
+                            </div>
+
+                            <table class="key-value-table">
+                                <tr>
+                                    <td class="key-column">Document Type</td>
+                                    <td class="value-column">${classification.document_type || 'Unknown'}</td>
+                                </tr>
+                                ${classification.document_subtype ? `
+                                <tr>
+                                    <td class="key-column">Document Subtype</td>
+                                    <td class="value-column">${classification.document_subtype}</td>
+                                </tr>` : ''}
+                                <tr>
+                                    <td class="key-column">Complexity</td>
+                                    <td class="value-column">${classification.structure_complexity || 'N/A'}/5</td>
+                                </tr>
+                            </table>
+
+                            ${classification.extraction_priority && classification.extraction_priority.length > 0 ? `
+                            <div style="margin-top: 16px;">
+                                <div style="font-weight: bold; margin-bottom: 8px;">Extraction Priorities</div>
+                                <ul style="margin: 0; padding-left: 20px;">
+                                    ${classification.extraction_priority.map(item => `<li>${item}</li>`).join('')}
+                                </ul>
+                            </div>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Extracted Information Section
+            if (processingResults.extract_information) {
+                const extraction = processingResults.extract_information;
+                const fields = extraction.extracted_fields || {};
+
+                if (Object.keys(fields).length > 0) {
+                    html += `
+                        <div class="results-section">
+                            <div class="results-heading">Extracted Information</div>
+                            <div class="results-content">
+                                <table class="key-value-table">
+                                    <tr>
+                                        <th style="text-align: left; padding: 8px 12px; border-bottom: 2px solid #eee;">Field</th>
+                                        <th style="text-align: left; padding: 8px 12px; border-bottom: 2px solid #eee;">Value</th>
+                                        <th style="text-align: center; padding: 8px 12px; border-bottom: 2px solid #eee;">Confidence</th>
+                                    </tr>
+                    `;
+
+                    for (const [field, data] of Object.entries(fields)) {
+                        const confidence = data.confidence || 0;
+                        const confidencePercent = Math.round(confidence * 100);
+                        let confidenceClass = confidence >= 0.8 ? 'high-confidence' :
+                                            confidence >= 0.5 ? 'medium-confidence' : 'low-confidence';
+
+                        html += `
+                            <tr>
+                                <td class="key-column">${field}</td>
+                                <td class="value-column">${data.value || 'N/A'}</td>
+                                <td class="confidence-column">
+                                    <span class="confidence-badge ${confidenceClass}">${confidencePercent}%</span>
+                                </td>
+                            </tr>
+                        `;
+                    }
+
+                    html += `
+                                </table>
+                                ${extraction.extraction_notes ? `
+                                <div style="margin-top: 16px; font-style: italic; color: #666;">
+                                    ${extraction.extraction_notes}
+                                </div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+
+            // Content Analysis Section
+            if (processingResults.analyze_content) {
+                const analysis = processingResults.analyze_content;
+
+                html += `
+                    <div class="results-section">
+                        <div class="results-heading">Content Analysis</div>
+                        <div class="results-content">
+                `;
+
+                // Summary
+                if (analysis.summary) {
+                    html += `
+                        <div style="margin-bottom: 16px;">
+                            <div style="font-weight: bold; margin-bottom: 8px;">Summary</div>
+                            <p style="margin: 0;">${analysis.summary}</p>
+                        </div>
+                    `;
+                }
+
+                // Themes
+                if (analysis.themes && analysis.themes.length) {
+                    html += `
+                        <div style="margin-bottom: 16px;">
+                            <div style="font-weight: bold; margin-bottom: 8px;">Key Themes</div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                ${analysis.themes.map(theme =>
+                                    `<span style="background: #e0f2fe; color: #0369a1; padding: 4px 10px; border-radius: 16px; font-size: 14px;">${theme}</span>`
+                                ).join('')}
+                            </div>
+                        </div>
+                    `;
+                }
+
+                // Key Insights
+                if (analysis.key_insights && analysis.key_insights.length) {
+                    html += `
+                        <div style="margin-bottom: 16px;">
+                            <div style="font-weight: bold; margin-bottom: 8px;">Key Insights</div>
+                            <ul style="margin: 0; padding-left: 20px;">
+                                ${analysis.key_insights.map(insight => `<li>${insight}</li>`).join('')}
+                            </ul>
+                        </div>
+                    `;
+                }
+
+                // Entity Relationships
+                if (analysis.entity_relationships && analysis.entity_relationships.length) {
+                    html += `
+                        <div>
+                            <div style="font-weight: bold; margin-bottom: 8px;">Entity Relationships</div>
+                            <ul style="margin: 0; padding-left: 20px;">
+                                ${analysis.entity_relationships.map(rel =>
+                                    `<li><strong>${rel.entity1}</strong> ${rel.relationship} <strong>${rel.entity2}</strong></li>`
+                                ).join('')}
+                            </ul>
+                        </div>
+                    `;
+                }
+
+                html += `
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Validation Results Section
+            if (processingResults.validate_extraction) {
+                const validation = processingResults.validate_extraction;
+                const results = validation.validation_results || {};
+
+                const overallQuality = validation.overall_quality || 0;
+                const qualityClass = overallQuality >= 0.8 ? 'high-confidence' :
+                                    overallQuality >= 0.5 ? 'medium-confidence' : 'low-confidence';
+
+                html += `
+                    <div class="results-section">
+                        <div class="results-heading">Validation Results</div>
+                        <div class="results-content">
+                            <div class="confidence-indicator-wrapper">
+                                <div class="confidence-label">Overall Quality:
+                                    <span class="confidence-badge ${qualityClass}">${Math.round(overallQuality * 100)}%</span>
+                                </div>
+                                <div class="confidence-indicator">
+                                    <div class="level" style="width: ${overallQuality * 100}%; background-color: ${
+                                        overallQuality >= 0.8 ? '#2ecc71' :
+                                        overallQuality >= 0.5 ? '#f39c12' : '#e74c3c'
+                                    };"></div>
+                                </div>
+                            </div>
+
+                            ${validation.validation_summary ? `
+                            <div style="margin-top: 16px;">
+                                <p style="margin: 0;">${validation.validation_summary}</p>
+                            </div>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Question Answering Section
+            if (processingResults.answer_question) {
+                const qa = processingResults.answer_question;
+                const confidence = qa.confidence || 0;
+                const confidenceClass = confidence >= 0.8 ? 'high-confidence' :
+                                    confidence >= 0.5 ? 'medium-confidence' : 'low-confidence';
+
+                html += `
+                    <div class="results-section">
+                        <div class="results-heading">Answer</div>
+                        <div class="results-content">
+                            <div class="confidence-label" style="margin-bottom: 12px;">Answer Confidence:
+                                <span class="confidence-badge ${confidenceClass}">${Math.round(confidence * 100)}%</span>
+                            </div>
+
+                            <div style="background-color: #f8f9fa; padding: 16px; border-radius: 8px; border-left: 4px solid #3498db;">
+                                ${qa.answer || 'No answer provided'}
+                            </div>
+
+                            ${(qa.sources && qa.sources.length) ? `
+                            <div style="margin-top: 16px;">
+                                <div style="font-weight: bold; margin-bottom: 8px;">Sources</div>
+                                <ul style="margin: 0; padding-left: 20px;">
+                                    ${qa.sources.map(source => `<li>${source}</li>`).join('')}
+                                </ul>
+                            </div>` : ''}
+
+                            ${(qa.follow_up_suggestions && qa.follow_up_suggestions.length) ? `
+                            <div style="margin-top: 16px;">
+                                <div style="font-weight: bold; margin-bottom: 8px;">Follow-up Questions</div>
+                                <ul style="margin: 0; padding-left: 20px;">
+                                    ${qa.follow_up_suggestions.map(question => `<li>${question}</li>`).join('')}
+                                </ul>
+                            </div>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += '</div>'; // Close the agent-results-container
+
+            container.innerHTML = html;
+        }
+
+        // Function to format JSON with syntax highlighting
+        function formatJSON(json) {
+            if (typeof json === 'string') {
+                try {
+                    json = JSON.parse(json);
+                } catch (e) {
+                    return json;
+                }
+            }
+
+            const jsonString = JSON.stringify(json, null, 2);
+            return jsonString
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                    let cls = 'json-number';
+                    if (/^"/.test(match)) {
+                        if (/:$/.test(match)) {
+                            cls = 'json-key';
+                        } else {
+                            cls = 'json-string';
+                        }
+                    } else if (/true|false/.test(match)) {
+                        cls = 'json-boolean';
+                    } else if (/null/.test(match)) {
+                        cls = 'json-null';
+                    }
+                    return '<span class="' + cls + '">' + match + '</span>';
+                });
+        }
+
+        // Function to filter agent activity by type
+        function filterAgentActivity() {
+            const filter = document.getElementById('agent-filter').value;
+            const activityContainer = document.getElementById('agent-activity-container');
+            const cards = activityContainer.querySelectorAll('.agent-activity-card');
+
+            cards.forEach(card => {
+                const agentType = card.getAttribute('data-agent-type');
+                if (filter === 'all' || agentType === filter) {
+                    card.style.display = 'block';
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+        }
+
+        // Function to toggle activity details
+        function toggleActivityDetails(cardId) {
+            const details = document.getElementById(`details-${cardId}`);
+            const toggleIcon = document.getElementById(`toggle-${cardId}`);
+
+            if (details.style.maxHeight) {
+                details.style.maxHeight = null;
+                toggleIcon.style.transform = 'rotate(0deg)';
+            } else {
+                details.style.maxHeight = details.scrollHeight + "px";
+                toggleIcon.style.transform = 'rotate(180deg)';
+            }
+        }
+
+        // Enhanced function to refresh agent activity
+        async function refreshAgentActivity() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/agent-activity`);
+                const data = await response.json();
+
+                const activityContainer = document.getElementById('agent-activity-container');
+
+                if (data.activity && data.activity.length > 0) {
+                    let activityHtml = '';
+
+                    data.activity.forEach((log, index) => {
+                        const cardId = `card-${index}`;
+                        const timestamp = new Date(log.timestamp).toLocaleString();
+
+                        // Determine agent type and styling
+                        let agentType = '';
+                        let agentColor = '';
+                        let agentIcon = '';
+
+                        switch(log.agent_id) {
+                            case 'router':
+                                agentType = 'classify';
+                                agentColor = '#3498db';
+                                agentIcon = 'R';
+                                break;
+                            case 'extractor':
+                                agentType = 'extract';
+                                agentColor = '#e74c3c';
+                                agentIcon = 'E';
+                                break;
+                            case 'analyzer':
+                                agentType = 'analyze';
+                                agentColor = '#2ecc71';
+                                agentIcon = 'A';
+                                break;
+                            case 'validator':
+                                agentType = 'validate';
+                                agentColor = '#f39c12';
+                                agentIcon = 'V';
+                                break;
+                            case 'qa':
+                                agentType = 'answer';
+                                agentColor = '#9b59b6';
+                                agentIcon = 'Q';
+                                break;
+                            default:
+                                agentType = 'other';
+                                agentColor = '#7f8c8d';
+                                agentIcon = '?';
+                        }
+
+                        activityHtml += `
+                            <div class="agent-activity-card" data-agent-type="${agentType}" id="${cardId}">
+                                <div class="agent-activity-header" onclick="toggleActivityDetails('${cardId}')">
+                                    <div class="agent-icon" style="background-color: ${agentColor}">${agentIcon}</div>
+                                    <div class="agent-details">
+                                        <div class="agent-title">${log.agent_id.charAt(0).toUpperCase() + log.agent_id.slice(1)} Agent</div>
+                                        <div class="agent-action">${log.action}</div>
+                                    </div>
+                                    <div class="agent-timestamp">${timestamp}</div>
+                                    <div class="toggle-icon" id="toggle-${cardId}">▼</div>
+                                </div>
+                                <div class="agent-activity-details" id="details-${cardId}">
+                                    <div class="activity-section">
+                                        <div class="section-header">Inputs</div>
+                                        <div class="json-container">
+                                            <pre class="formatted-json">${formatJSON(log.inputs)}</pre>
+                                        </div>
+                                    </div>
+                                    <div class="activity-section">
+                                        <div class="section-header">Outputs</div>
+                                        <div class="json-container">
+                                            <pre class="formatted-json">${formatJSON(log.outputs)}</pre>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+
+                    activityContainer.innerHTML = activityHtml;
+
+                    // Apply current filter
+                    filterAgentActivity();
+
+                } else {
+                    activityContainer.innerHTML = '<p>No agent activity yet.</p>';
+                }
+            } catch (error) {
+                console.error('Error fetching agent activity:', error);
+                document.getElementById('agent-activity-container').innerHTML =
+                    '<p class="error">Error loading agent activity: ' + error.message + '</p>';
+            }
+        }
+
+        // Toggle conversation history
+        document.getElementById('view-history-button').addEventListener('click', () => {
+            const historyPanel = document.querySelector('.conversation-history');
+            if (historyPanel.style.display === 'none') {
+                historyPanel.style.display = 'block';
+                document.getElementById('view-history-button').textContent = 'Hide History';
+                updateConversationHistory();
+            } else {
+                historyPanel.style.display = 'none';
+                document.getElementById('view-history-button').textContent = 'View History';
+            }
+        });
+
+        // Refresh agent activity
+        document.getElementById('refresh-activity-button').addEventListener('click', refreshAgentActivity);
+
+        // Function to fetch and update conversation history
+        async function updateConversationHistory() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/conversation-history`);
+                const data = await response.json();
+
+                const historyContainer = document.getElementById('history-container');
+
+                if (data.history && data.history.length > 0) {
+                    let historyHtml = '';
+
+                    data.history.forEach((message, index) => {
+                        const isUser = message.role === 'user';
+                        const bubbleClass = isUser ? 'user-message' : 'assistant-message';
+
+                        historyHtml += `
+                            <div class="${bubbleClass}">
+                                <div style="font-weight: bold; margin-bottom: 5px;">${isUser ? 'You' : 'Assistant'}</div>
+                                <div>${message.content}</div>
+                            </div>
+                        `;
+                    });
+
+                    historyContainer.innerHTML = historyHtml;
+                } else {
+                    historyContainer.innerHTML = '<p>No conversation history yet.</p>';
+                }
+            } catch (error) {
+                console.error('Error fetching conversation history:', error);
+            }
+        }
+
+        // Function to update the file list display
+        function updateFileList() {
+            const fileListContainer = document.getElementById('file-list-container');
+
+            if (uploadedFiles.length === 0) {
+                fileListContainer.innerHTML = '<p>No files uploaded yet.</p>';
+                return;
+            }
+
+            let html = '';
+            uploadedFiles.forEach(file => {
+                html += `
+                    <div class="file-item">
+                        <span class="file-name">${file.name}</span>
+                        <div class="file-actions">
+                            <button class="process-file-button" data-path="${file.path}">Process with Agents</button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            fileListContainer.innerHTML = html;
+
+            // Add event listeners to process buttons
+            document.querySelectorAll('.process-file-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    // Switch to agent mode
+                    document.querySelector('.mode-option[data-mode="agent"]').click();
+
+                    // Select the file in the dropdown
+                    const filePath = button.getAttribute('data-path');
+                    document.getElementById('agent-file-select').value = filePath;
+
+                    // Focus on the query input
+                    document.getElementById('agent-query-input').focus();
+                });
+            });
+        }
+
+        // Function to update the agent file select dropdown
+        function updateAgentFileSelect() {
+            const fileSelect = document.getElementById('agent-file-select');
+
+            // Clear existing options (except the placeholder)
+            while (fileSelect.options.length > 1) {
+                fileSelect.remove(1);
+            }
+
+            // Add options for each uploaded file
+            uploadedFiles.forEach(file => {
+                const option = document.createElement('option');
+                option.value = file.path;
+                option.textContent = file.name;
+                fileSelect.appendChild(option);
+            });
+        }
+    </script>
+</body>
+</html>

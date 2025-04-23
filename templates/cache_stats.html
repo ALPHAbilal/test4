@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Cache Statistics</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card {
+            background: #fff;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-box {
+            background: #f8f9fa;
+            border-left: 4px solid #3498db;
+            padding: 15px;
+            border-radius: 4px;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2980b9;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #7f8c8d;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: bold;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .btn {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .btn:hover {
+            background: #2980b9;
+        }
+        .btn-danger {
+            background: #e74c3c;
+        }
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        .btn-warning {
+            background: #f39c12;
+        }
+        .btn-warning:hover {
+            background: #d35400;
+        }
+        .actions {
+            margin-bottom: 20px;
+        }
+        .actions button {
+            margin-right: 10px;
+        }
+        .duplicate-group {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .fingerprint {
+            font-family: monospace;
+            color: #7f8c8d;
+            font-size: 12px;
+        }
+        .file-list {
+            margin-top: 5px;
+            padding-left: 20px;
+        }
+        .file-path {
+            font-family: monospace;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        .refresh-btn {
+            margin-left: 10px;
+            background: #2ecc71;
+        }
+        .refresh-btn:hover {
+            background: #27ae60;
+        }
+        #message {
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Document Cache Statistics</h1>
+        
+        <div id="message"></div>
+        
+        <div class="actions">
+            <button class="btn refresh-btn" onclick="refreshStats()">Refresh Stats</button>
+            <button class="btn btn-warning" onclick="clearOldCache()">Clear Old Cache (7+ days)</button>
+            <button class="btn btn-danger" onclick="clearAllCache()">Clear All Cache</button>
+        </div>
+        
+        <div class="card">
+            <h2>Cache Overview</h2>
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-value" id="document-count">-</div>
+                    <div class="stat-label">Total Documents</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="unique-count">-</div>
+                    <div class="stat-label">Unique Documents</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="duplicate-count">-</div>
+                    <div class="stat-label">Duplicate Documents</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="total-size">-</div>
+                    <div class="stat-label">Total Content Size</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Cached Files (Sample)</h2>
+            <table id="files-table">
+                <thead>
+                    <tr>
+                        <th>File Path</th>
+                    </tr>
+                </thead>
+                <tbody id="files-list">
+                    <tr><td>Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="card" id="duplicates-card" style="display: none;">
+            <h2>Duplicate Files</h2>
+            <div id="duplicate-groups">
+                Loading...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Function to format file size
+        function formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 Bytes';
+            
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        }
+        
+        // Function to refresh cache stats
+        function refreshStats() {
+            fetch('/cache-stats')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        const stats = data.cache_stats;
+                        
+                        // Update stats
+                        document.getElementById('document-count').textContent = stats.document_count;
+                        document.getElementById('unique-count').textContent = stats.unique_document_count;
+                        document.getElementById('duplicate-count').textContent = stats.duplicate_count;
+                        document.getElementById('total-size').textContent = formatBytes(stats.total_content_size_bytes);
+                        
+                        // Update files list
+                        const filesList = document.getElementById('files-list');
+                        filesList.innerHTML = '';
+                        
+                        if (stats.cached_files_sample && stats.cached_files_sample.length > 0) {
+                            stats.cached_files_sample.forEach(file => {
+                                const row = document.createElement('tr');
+                                const cell = document.createElement('td');
+                                cell.className = 'file-path';
+                                cell.textContent = file;
+                                row.appendChild(cell);
+                                filesList.appendChild(row);
+                            });
+                        } else {
+                            const row = document.createElement('tr');
+                            const cell = document.createElement('td');
+                            cell.textContent = 'No files in cache';
+                            row.appendChild(cell);
+                            filesList.appendChild(row);
+                        }
+                        
+                        // Update duplicate groups
+                        const duplicatesCard = document.getElementById('duplicates-card');
+                        const duplicateGroups = document.getElementById('duplicate-groups');
+                        
+                        if (stats.duplicate_count > 0 && stats.duplicate_groups) {
+                            duplicatesCard.style.display = 'block';
+                            duplicateGroups.innerHTML = '';
+                            
+                            Object.entries(stats.duplicate_groups).forEach(([fingerprint, files]) => {
+                                const groupDiv = document.createElement('div');
+                                groupDiv.className = 'duplicate-group';
+                                
+                                const fingerprintDiv = document.createElement('div');
+                                fingerprintDiv.className = 'fingerprint';
+                                fingerprintDiv.textContent = `Fingerprint: ${fingerprint.substring(0, 16)}...`;
+                                groupDiv.appendChild(fingerprintDiv);
+                                
+                                const fileList = document.createElement('ul');
+                                fileList.className = 'file-list';
+                                
+                                files.forEach(file => {
+                                    const fileItem = document.createElement('li');
+                                    fileItem.className = 'file-path';
+                                    fileItem.textContent = file;
+                                    fileList.appendChild(fileItem);
+                                });
+                                
+                                groupDiv.appendChild(fileList);
+                                duplicateGroups.appendChild(groupDiv);
+                            });
+                        } else {
+                            duplicatesCard.style.display = 'none';
+                        }
+                        
+                        showMessage('Cache statistics refreshed successfully', 'success');
+                    } else {
+                        showMessage('Error refreshing cache statistics: ' + data.message, 'error');
+                    }
+                })
+                .catch(error => {
+                    showMessage('Error refreshing cache statistics: ' + error, 'error');
+                });
+        }
+        
+        // Function to clear old cache
+        function clearOldCache() {
+            if (confirm('Are you sure you want to clear cache entries older than 7 days?')) {
+                fetch('/clear-cache', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        older_than_days: 7
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showMessage(data.message, 'success');
+                        refreshStats();
+                    } else {
+                        showMessage('Error clearing cache: ' + data.message, 'error');
+                    }
+                })
+                .catch(error => {
+                    showMessage('Error clearing cache: ' + error, 'error');
+                });
+            }
+        }
+        
+        // Function to clear all cache
+        function clearAllCache() {
+            if (confirm('Are you sure you want to clear the entire document cache? This cannot be undone.')) {
+                fetch('/clear-cache', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showMessage(data.message, 'success');
+                        refreshStats();
+                    } else {
+                        showMessage('Error clearing cache: ' + data.message, 'error');
+                    }
+                })
+                .catch(error => {
+                    showMessage('Error clearing cache: ' + error, 'error');
+                });
+            }
+        }
+        
+        // Function to show message
+        function showMessage(message, type) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.textContent = message;
+            messageDiv.className = type;
+            messageDiv.style.display = 'block';
+            
+            // Hide message after 5 seconds
+            setTimeout(() => {
+                messageDiv.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Load stats on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshStats();
+        });
+    </script>
+</body>
+</html>

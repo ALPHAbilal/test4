@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Management Test</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #dee2e6;
+            transition: background-color 0.2s;
+        }
+        .file-item:hover {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+        .file-item .form-check {
+            margin-right: 1rem;
+        }
+        .file-item .file-info {
+            flex-grow: 1;
+        }
+        .file-item .file-name {
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+        }
+        .file-item .file-meta {
+            font-size: 0.8rem;
+            color: #6c757d;
+        }
+        .file-toggle-all {
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            background-color: rgba(0, 0, 0, 0.05);
+            border-radius: 0.25rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+        }
+        h2 {
+            margin-bottom: 20px;
+            color: #343a40;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            border-color: #007bff;
+        }
+        .btn-primary:hover {
+            background-color: #0069d9;
+            border-color: #0062cc;
+        }
+        .alert {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">File Management Test</h1>
+        
+        <div class="section">
+            <h2>Step 1: Select Knowledge Base</h2>
+            <div class="form-group">
+                <label for="vector_store_id" class="form-label">Knowledge Base</label>
+                <select id="vector_store_id" class="form-select">
+                    <option value="">-- Select Knowledge Base --</option>
+                    <!-- Will be populated via JavaScript -->
+                </select>
+            </div>
+            <button id="load-kb-files" class="btn btn-primary">Load Files</button>
+        </div>
+        
+        <div class="section">
+            <h2>Step 2: Create Test Chat</h2>
+            <div class="form-group">
+                <label for="chat_title" class="form-label">Chat Title</label>
+                <input type="text" id="chat_title" class="form-control" value="Test Chat">
+            </div>
+            <button id="create-test-chat" class="btn btn-primary" disabled>Create Test Chat</button>
+            <div id="chat-info" class="alert alert-info mt-3" style="display: none;"></div>
+        </div>
+        
+        <div class="section">
+            <h2>Step 3: Manage Files</h2>
+            <div id="file-management-container">
+                <div id="kb-files-loading" class="text-center py-4" style="display: none;">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Loading files...</p>
+                </div>
+                
+                <div id="kb-files-empty" class="alert alert-info" style="display: none;">
+                    No files found in this knowledge base.
+                </div>
+                
+                <div id="kb-files-error" class="alert alert-danger" style="display: none;">
+                    Error loading files. Please try again.
+                </div>
+                
+                <div id="kb-files-list" style="display: none;">
+                    <!-- Files will be populated here via JavaScript -->
+                </div>
+                
+                <button id="save-file-selection" class="btn btn-primary mt-3" style="display: none;">Apply Changes</button>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Step 4: Test Chat</h2>
+            <div class="form-group">
+                <label for="test_message" class="form-label">Test Message</label>
+                <input type="text" id="test_message" class="form-control" value="Tell me about the documents in the knowledge base">
+            </div>
+            <button id="send-test-message" class="btn btn-primary" disabled>Send Message</button>
+            <div id="response-container" class="mt-3 p-3 border rounded" style="display: none;">
+                <h5>Response:</h5>
+                <div id="response-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Global variables
+        let selectedVectorStoreId = '';
+        let currentChatId = '';
+        let knowledgeBaseFiles = [];
+        let includedFileIds = [];
+        
+        // DOM elements
+        const vectorStoreSelect = document.getElementById('vector_store_id');
+        const loadKbFilesButton = document.getElementById('load-kb-files');
+        const createTestChatButton = document.getElementById('create-test-chat');
+        const chatTitleInput = document.getElementById('chat_title');
+        const chatInfoDiv = document.getElementById('chat-info');
+        const kbFilesLoading = document.getElementById('kb-files-loading');
+        const kbFilesList = document.getElementById('kb-files-list');
+        const kbFilesEmpty = document.getElementById('kb-files-empty');
+        const kbFilesError = document.getElementById('kb-files-error');
+        const saveFileSelectionButton = document.getElementById('save-file-selection');
+        const sendTestMessageButton = document.getElementById('send-test-message');
+        const testMessageInput = document.getElementById('test_message');
+        const responseContainer = document.getElementById('response-container');
+        const responseContent = document.getElementById('response-content');
+        
+        // Load vector stores on page load
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const response = await fetch('/api/vector_stores');
+                if (!response.ok) {
+                    throw new Error('Failed to load vector stores');
+                }
+                
+                const data = await response.json();
+                const vectorStores = data.vector_stores || [];
+                
+                // Populate the select element
+                vectorStores.forEach(store => {
+                    const option = document.createElement('option');
+                    option.value = store.id;
+                    option.textContent = `${store.name} (${store.id.slice(-6)})`;
+                    vectorStoreSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading vector stores:', error);
+                alert('Error loading vector stores. Please refresh the page.');
+            }
+        });
+        
+        // Load KB files button click handler
+        loadKbFilesButton.addEventListener('click', async () => {
+            selectedVectorStoreId = vectorStoreSelect.value;
+            if (!selectedVectorStoreId) {
+                alert('Please select a knowledge base');
+                return;
+            }
+            
+            createTestChatButton.disabled = false;
+            await loadKnowledgeBaseFiles(selectedVectorStoreId);
+        });
+        
+        // Create test chat button click handler
+        createTestChatButton.addEventListener('click', async () => {
+            if (!selectedVectorStoreId) {
+                alert('Please select a knowledge base');
+                return;
+            }
+            
+            const chatTitle = chatTitleInput.value.trim() || 'Test Chat';
+            
+            try {
+                // Create a new chat
+                const response = await fetch('/api/chats', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        title: chatTitle,
+                        vector_store_id: selectedVectorStoreId
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to create chat');
+                }
+                
+                const data = await response.json();
+                currentChatId = data.chat_id;
+                
+                // Show chat info
+                chatInfoDiv.style.display = 'block';
+                chatInfoDiv.textContent = `Chat created with ID: ${currentChatId}`;
+                
+                // Enable send message button
+                sendTestMessageButton.disabled = false;
+                
+                // Set all files as included by default
+                includedFileIds = knowledgeBaseFiles.map(file => file.id);
+                renderKnowledgeBaseFiles();
+                saveFileSelectionButton.style.display = 'block';
+            } catch (error) {
+                console.error('Error creating chat:', error);
+                alert(`Error creating chat: ${error.message}`);
+            }
+        });
+        
+        // Save file selection button click handler
+        saveFileSelectionButton.addEventListener('click', async () => {
+            if (!currentChatId) {
+                alert('No chat selected');
+                return;
+            }
+            
+            try {
+                // Show loading state
+                saveFileSelectionButton.disabled = true;
+                saveFileSelectionButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving...';
+                
+                // Send the included file IDs to the server
+                const response = await fetch(`/api/chat_files/${currentChatId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        included_file_ids: includedFileIds
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to save file selection');
+                }
+                
+                // Show success message
+                alert('File selection saved successfully');
+            } catch (error) {
+                console.error('Error saving file selection:', error);
+                alert(`Error: ${error.message}`);
+            } finally {
+                // Reset button state
+                saveFileSelectionButton.disabled = false;
+                saveFileSelectionButton.innerHTML = 'Apply Changes';
+            }
+        });
+        
+        // Send test message button click handler
+        sendTestMessageButton.addEventListener('click', async () => {
+            if (!currentChatId) {
+                alert('No chat selected');
+                return;
+            }
+            
+            const message = testMessageInput.value.trim();
+            if (!message) {
+                alert('Please enter a message');
+                return;
+            }
+            
+            try {
+                // Show loading state
+                sendTestMessageButton.disabled = true;
+                sendTestMessageButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Sending...';
+                
+                // Send the message to the server
+                const response = await fetch(`/api/chats/${currentChatId}/messages`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: message
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to send message');
+                }
+                
+                const data = await response.json();
+                
+                // Show the response
+                responseContainer.style.display = 'block';
+                responseContent.innerHTML = data.response;
+            } catch (error) {
+                console.error('Error sending message:', error);
+                alert(`Error: ${error.message}`);
+            } finally {
+                // Reset button state
+                sendTestMessageButton.disabled = false;
+                sendTestMessageButton.innerHTML = 'Send Message';
+            }
+        });
+        
+        // Load knowledge base files
+        async function loadKnowledgeBaseFiles(vectorStoreId) {
+            // Show loading, hide other elements
+            kbFilesLoading.style.display = 'block';
+            kbFilesList.style.display = 'none';
+            kbFilesEmpty.style.display = 'none';
+            kbFilesError.style.display = 'none';
+            
+            try {
+                // Fetch the files from the API
+                const response = await fetch(`/api/kb_files/${vectorStoreId}`);
+                if (!response.ok) {
+                    throw new Error('Failed to load files');
+                }
+                
+                const data = await response.json();
+                knowledgeBaseFiles = data.files || [];
+                
+                // Set all files as included by default
+                includedFileIds = knowledgeBaseFiles.map(file => file.id);
+                
+                // Render the files
+                renderKnowledgeBaseFiles();
+                
+                // Show the list if there are files, otherwise show empty message
+                if (knowledgeBaseFiles.length > 0) {
+                    kbFilesList.style.display = 'block';
+                } else {
+                    kbFilesEmpty.style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error loading files:', error);
+                kbFilesError.style.display = 'block';
+                kbFilesError.textContent = `Error: ${error.message}`;
+            } finally {
+                kbFilesLoading.style.display = 'none';
+            }
+        }
+        
+        // Render knowledge base files
+        function renderKnowledgeBaseFiles() {
+            kbFilesList.innerHTML = '';
+            
+            // Add toggle all section
+            const toggleAllDiv = document.createElement('div');
+            toggleAllDiv.className = 'file-toggle-all';
+            toggleAllDiv.innerHTML = `
+                <div>
+                    <strong>Files in Knowledge Base (${knowledgeBaseFiles.length})</strong>
+                </div>
+                <div>
+                    <button class="btn btn-sm btn-outline-primary" id="select-all-files">Select All</button>
+                    <button class="btn btn-sm btn-outline-secondary ms-2" id="deselect-all-files">Deselect All</button>
+                </div>
+            `;
+            kbFilesList.appendChild(toggleAllDiv);
+            
+            // Add event listeners for toggle buttons
+            document.getElementById('select-all-files').addEventListener('click', () => {
+                includedFileIds = knowledgeBaseFiles.map(file => file.id);
+                renderKnowledgeBaseFiles();
+            });
+            
+            document.getElementById('deselect-all-files').addEventListener('click', () => {
+                includedFileIds = [];
+                renderKnowledgeBaseFiles();
+            });
+            
+            // Add each file
+            knowledgeBaseFiles.forEach(file => {
+                const isIncluded = includedFileIds.includes(file.id);
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                fileItem.innerHTML = `
+                    <div class="form-check">
+                        <input class="form-check-input file-checkbox" type="checkbox" value="${file.id}" id="file-${file.id}" ${isIncluded ? 'checked' : ''}>
+                    </div>
+                    <div class="file-info">
+                        <div class="file-name">${file.filename || 'Unnamed File'}</div>
+                        <div class="file-meta">
+                            ${file.metadata ? `Type: ${file.metadata.document_type || 'Unknown'} | ` : ''}
+                            ${file.created_at ? `Added: ${new Date(file.created_at).toLocaleDateString()}` : ''}
+                        </div>
+                    </div>
+                `;
+                kbFilesList.appendChild(fileItem);
+                
+                // Add event listener for checkbox
+                const checkbox = fileItem.querySelector('.file-checkbox');
+                checkbox.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        if (!includedFileIds.includes(file.id)) {
+                            includedFileIds.push(file.id);
+                        }
+                    } else {
+                        includedFileIds = includedFileIds.filter(id => id !== file.id);
+                    }
+                });
+            });
+        }
+    </script>
+</body>
+</html>
