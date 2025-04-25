@@ -73,6 +73,30 @@
       "description": "Analyze the outcome of an agent call and suggest next actions.",
       "module": "tools.reasoning_tools.outcome_analyzer",
       "function": "analyze_agent_outcome"
+    },
+    {
+      "name": "generate_learning_report",
+      "description": "Generate a comprehensive learning report.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "generate_learning_report"
+    },
+    {
+      "name": "get_query_type_metrics",
+      "description": "Get metrics for a specific query type.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "get_query_type_metrics"
+    },
+    {
+      "name": "get_all_query_types",
+      "description": "Get all query types with metrics.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "get_all_query_types"
+    },
+    {
+      "name": "get_learning_effectiveness_summary",
+      "description": "Get a summary of learning effectiveness across all query types.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "get_learning_effectiveness_summary"
     }
   ]
 }

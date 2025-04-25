@@ -7,6 +7,7 @@ This module provides the main execution loop for step-by-step orchestration.
 import json
 import logging
 import html
+import time
 from typing import Dict, List, Any, Optional, Union, Callable
 import asyncio
 
@@ -21,6 +22,9 @@ from tools.registry import ToolRegistry
 
 # Import memory store
 from core.memory import memory_store
+
+# Import learning metrics
+from core.evaluation import learning_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,9 @@ class OrchestrationEngine:
         Returns:
             The final response to the user
         """
+        # Record start time for metrics
+        start_time = time.time()
+
         # Initialize step counter
         step_count = 0
 
@@ -67,6 +74,11 @@ class OrchestrationEngine:
         # Initialize workflow tracking if not already present
         if "workflow_steps" not in workflow_context:
             workflow_context["workflow_steps"] = []
+
+        # Initialize metrics tracking
+        pattern_used = False
+        pattern_name = None
+        query_type = None
 
         # Get the WorkflowRouterAgent from the registry
         router_agent = self.agent_registry.get_agent("WorkflowRouterAgent")
@@ -101,6 +113,15 @@ class OrchestrationEngine:
                 action = router_output.get("action")
                 details = router_output.get("details", {})
                 state_update = router_output.get("state_update", {})
+
+                # Track query type and pattern usage for metrics
+                if "current_query_type" in state_update:
+                    query_type = state_update["current_query_type"]
+
+                # Check if a pattern was used
+                if "pattern_used" in state_update:
+                    pattern_used = state_update["pattern_used"]
+                    pattern_name = state_update.get("pattern_name")
 
                 # Track the action in the workflow steps
                 if action == "call_agent":
@@ -292,6 +313,38 @@ class OrchestrationEngine:
                     # Return the final response to the user
                     final_response = details.get("final_response", "")
                     logger.info("Returning final response to user")
+
+                    # Record workflow execution metrics
+                    if learning_metrics and query_type:
+                        try:
+                            # Calculate execution time
+                            execution_time = time.time() - start_time
+
+                            # Record workflow execution
+                            learning_metrics.record_workflow_execution(
+                                query_type=query_type,
+                                pattern_used=pattern_used,
+                                pattern_name=pattern_name,
+                                step_count=step_count,
+                                success=True,
+                                execution_time=execution_time,
+                                session_id=workflow_context.get("chat_id")
+                            )
+
+                            # Record pattern learning if successful pattern was used
+                            if state_update.get("workflow_success") and state_update.get("successful_pattern"):
+                                learning_metrics.record_pattern_learning(
+                                    query_type=query_type,
+                                    pattern_name=pattern_name or query_type,
+                                    pattern_steps=state_update.get("successful_pattern", []),
+                                    success_count=1,
+                                    session_id=workflow_context.get("chat_id")
+                                )
+
+                            logger.info(f"Recorded metrics for workflow execution: query_type={query_type}, pattern_used={pattern_used}, step_count={step_count}")
+                        except Exception as e:
+                            logger.error(f"Error recording metrics: {e}")
+
                     return final_response
 
                 elif action == "needs_input":
@@ -304,6 +357,28 @@ class OrchestrationEngine:
                     # Report an error condition
                     error_message = details.get("message", "")
                     logger.error(f"Error reported by router: {error_message}")
+
+                    # Record workflow execution metrics for failure
+                    if learning_metrics and query_type:
+                        try:
+                            # Calculate execution time
+                            execution_time = time.time() - start_time
+
+                            # Record workflow execution
+                            learning_metrics.record_workflow_execution(
+                                query_type=query_type,
+                                pattern_used=pattern_used,
+                                pattern_name=pattern_name,
+                                step_count=step_count,
+                                success=False,
+                                execution_time=execution_time,
+                                session_id=workflow_context.get("chat_id")
+                            )
+
+                            logger.info(f"Recorded metrics for failed workflow execution: query_type={query_type}, pattern_used={pattern_used}, step_count={step_count}")
+                        except Exception as e:
+                            logger.error(f"Error recording metrics: {e}")
+
                     return f"Error: {html.escape(error_message)}"
 
                 else:
