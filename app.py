@@ -38,6 +38,9 @@ from agents.tracing.spans import Span # Needed for type hints in processor metho
 from agents.tracing import add_trace_processor # Correct registration function path
 # --- END CORRECTED Imports ---
 
+# --- Agent Registry Imports ---
+from agents.registry import AgentRegistry, initialize_agent_registry
+
 # --- Enhanced Intent Determination ---
 from core.intent_determination import determine_final_intent, record_intent_determination
 
@@ -68,6 +71,14 @@ app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY')
 if not app.config['SECRET_KEY']:
     logger.warning("FLASK_SECRET_KEY not set. Using temporary key.")
     app.config['SECRET_KEY'] = os.urandom(24)
+
+# --- Initialize Agent Registry ---
+try:
+    agent_registry = initialize_agent_registry()
+    logger.info(f"Agent registry initialized with {len(agent_registry.agents)} agents")
+except Exception as e:
+    logger.error(f"Error initializing agent registry: {e}")
+    agent_registry = None
 
 # --- Constants & Configurable Values ---
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
@@ -2274,7 +2285,18 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
         # Log the model being used
         model, _ = get_model_with_fallback()
         logger.info(f"Using model: {model} for query analysis")
-        analyzer_result = await Runner.run(query_analyzer_agent, input=json.dumps(analyzer_input), context=workflow_context)
+
+        # Get the QueryAnalyzerAgent from the registry
+        if agent_registry:
+            query_analyzer = agent_registry.get_agent("QueryAnalyzerAgent")
+            if not query_analyzer:
+                logger.error("QueryAnalyzerAgent not found in registry, using fallback")
+                query_analyzer = query_analyzer_agent  # Fallback to hardcoded agent
+        else:
+            logger.error("Agent registry not initialized, using fallback")
+            query_analyzer = query_analyzer_agent  # Fallback to hardcoded agent
+
+        analyzer_result = await Runner.run(query_analyzer, input=json.dumps(analyzer_input), context=workflow_context)
 
         # Log the raw analyzer result
         logger.info(f"QueryAnalyzerAgent raw result: {analyzer_result.final_output}")
