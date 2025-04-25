@@ -11,7 +11,7 @@ import asyncio
 from typing import Dict, List, Tuple, Any, Optional
 
 # Import DocumentAnalysis model
-from data_models import DocumentAnalysis
+from data.data_models import DocumentAnalysis
 
 # Setup logging
 logger = logging.getLogger(__name__)

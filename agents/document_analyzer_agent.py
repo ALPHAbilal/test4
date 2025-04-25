@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 
 # Import shared data models
-from data_models import DocumentAnalysis, DocumentSection
+from data.data_models import DocumentAnalysis, DocumentSection
 
 from agents import Agent, Runner, function_tool, RunContextWrapper
 
@@ -464,6 +464,36 @@ async def detect_fields_from_template(ctx: RunContextWrapper, input_data: Dict) 
     except Exception as e:
         logger.error(f"[Tool Error] Field detection failed: {e}", exc_info=True)
         return []
+
+# --- Integration Function ---
+async def extract_data_for_template_agent_based(ctx, context_sources, required_fields, document_analyses=None):
+    """
+    Extract data for a template using the document analyzer agent.
+
+    Args:
+        ctx: The run context
+        context_sources: The context sources
+        required_fields: The required fields
+        document_analyses: Optional document analyses
+
+    Returns:
+        The extracted data
+    """
+    logger.info(f"Extracting data for template with {len(context_sources)} sources and {len(required_fields)} required fields")
+
+    # This is a placeholder implementation
+    extracted_fields = {}
+
+    # Extract some basic fields if possible
+    for field in required_fields:
+        # For demonstration purposes, extract some fields from the context
+        for source in context_sources:
+            if isinstance(source, str) and field.lower() in source.lower():
+                # Very simple extraction - in a real implementation, this would be more sophisticated
+                extracted_fields[field] = f"Extracted {field} from context"
+                break
+
+    return extracted_fields
 
 # --- New Document Analysis Function ---
 @function_tool(strict_mode=False)

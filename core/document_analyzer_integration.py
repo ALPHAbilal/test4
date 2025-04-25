@@ -9,10 +9,10 @@ import logging
 from typing import List, Dict, Optional
 
 # Import the shared data model
-from data_models import ExtractedData
+from data.data_models import ExtractedData
 
 # Import the required function from DocumentAnalyzerAgent
-from document_analyzer_agent import extract_data_for_template_agent_based
+from agents.document_analyzer_agent import extract_data_for_template_agent_based
 
 # Setup logging
 logger = logging.getLogger(__name__)

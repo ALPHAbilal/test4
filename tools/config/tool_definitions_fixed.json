@@ -1,0 +1,102 @@
+{
+  "tools": [
+    {
+      "name": "list_knowledge_base_files",
+      "description": "Lists all files in the knowledge base.",
+      "module": "tools.kb_tools.kb_listing",
+      "function": "list_knowledge_base_files"
+    },
+    {
+      "name": "get_kb_document_content",
+      "description": "Retrieves content from the knowledge base (Vector Store) based on document type and query/identifier.",
+      "module": "tools.kb_tools.kb_adapter",
+      "function": "get_kb_document_content_adapter"
+    },
+    {
+      "name": "process_temp_file",
+      "description": "Reads and returns the text content of a previously uploaded temporary file for use as context.",
+      "module": "tools.file_tools.temp_file_processor",
+      "function": "process_temporary_file"
+    },
+    {
+      "name": "retrieve_template_content",
+      "description": "Retrieves the text content of a specified document template (txt, md, pdf).",
+      "module": "tools.template_tools.template_retrieval",
+      "function": "retrieve_template_content"
+    },
+    {
+      "name": "generate_docx_from_markdown",
+      "description": "Converts markdown content into a professionally formatted DOCX file.",
+      "module": "tools.template_tools.docx_generation",
+      "function": "generate_docx_from_markdown"
+    },
+    {
+      "name": "extract_data_for_template",
+      "description": "Extracts specific data fields required for a template from provided text context sources.",
+      "module": "tools.extraction_tools.data_extractor",
+      "function": "extract_data_for_template"
+    }
+  ,
+    {
+      "name": "get_agent_memory",
+      "description": "Get memory for an agent.",
+      "module": "tools.memory_tools.memory_tools",
+      "function": "get_agent_memory"
+    },
+    {
+      "name": "update_agent_memory",
+      "description": "Update memory for an agent.",
+      "module": "tools.memory_tools.memory_tools",
+      "function": "update_agent_memory"
+    },
+    {
+      "name": "add_to_agent_memory_list",
+      "description": "Add an item to a list in an agent's memory.",
+      "module": "tools.memory_tools.memory_tools",
+      "function": "add_to_agent_memory_list"
+    }
+  ,
+    {
+      "name": "suggest_tool_parameters",
+      "description": "Analyze the context and suggest parameters for a tool call.",
+      "module": "tools.reasoning_tools.parameter_helper",
+      "function": "suggest_tool_parameters"
+    },
+    {
+      "name": "analyze_tool_outcome",
+      "description": "Analyze the outcome of a tool call and suggest next actions.",
+      "module": "tools.reasoning_tools.outcome_analyzer",
+      "function": "analyze_tool_outcome"
+    },
+    {
+      "name": "analyze_agent_outcome",
+      "description": "Analyze the outcome of an agent call and suggest next actions.",
+      "module": "tools.reasoning_tools.outcome_analyzer",
+      "function": "analyze_agent_outcome"
+    },
+    {
+      "name": "generate_learning_report",
+      "description": "Generate a comprehensive learning report.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "generate_learning_report"
+    },
+    {
+      "name": "get_query_type_metrics",
+      "description": "Get metrics for a specific query type.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "get_query_type_metrics"
+    },
+    {
+      "name": "get_all_query_types",
+      "description": "Get all query types with metrics.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "get_all_query_types"
+    },
+    {
+      "name": "get_learning_effectiveness_summary",
+      "description": "Get a summary of learning effectiveness across all query types.",
+      "module": "tools.evaluation_tools.learning_report",
+      "function": "get_learning_effectiveness_summary"
+    }
+  ]
+}

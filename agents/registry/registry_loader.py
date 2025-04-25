@@ -33,8 +33,13 @@ def initialize_agent_registry(config_path: Optional[str] = None, tool_config_pat
     if config_path is None:
         # Get the directory of this file
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        # Construct path to default config file
-        config_path = os.path.join(os.path.dirname(current_dir), 'config', 'agent_definitions.json')
+        # Construct path to fixed config file
+        config_path = os.path.join(os.path.dirname(current_dir), 'config', 'agent_definitions_fixed.json')
+
+        # If the fixed file doesn't exist, fall back to the original
+        if not os.path.exists(config_path):
+            logger.warning(f"Fixed agent definitions file not found: {config_path}, falling back to original")
+            config_path = os.path.join(os.path.dirname(current_dir), 'config', 'agent_definitions.json')
 
     # Initialize tool registry if available
     tool_registry = None

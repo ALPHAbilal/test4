@@ -1,0 +1,1 @@
+{"patterns": {"kb_query": {"steps": ["call_tool:list_knowledge_base_files"], "success_count": 1, "first_learned": 1745594968.6288266, "last_updated": 1745594968.6288269}}, "learning_events": [{"timestamp": 1745594968.6288285, "pattern_name": "kb_query", "success_count": 1, "session_id": "90adece2-05d3-4356-a98a-bd689ddc650b"}], "last_updated": 1745594968.6288297}

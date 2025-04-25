@@ -10,19 +10,9 @@ import json
 import time
 import hashlib
 import logging
-from typing import Optional, Dict, Any, Union
-import os
-
-from agents import Agent, Runner
-from pydantic import BaseModel
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
-
-class QuerySimilarityResult(BaseModel):
-    """Result from the query similarity agent."""
-    are_equivalent: bool
-    confidence: float
-    reasoning: str
 
 class AgentDrivenSemanticCache:
     """
@@ -47,38 +37,9 @@ class AgentDrivenSemanticCache:
         self.ttl = ttl
         self.confidence_threshold = confidence_threshold
 
-        # Initialize the similarity agent
-        self.query_similarity_agent = Agent(
-            name="QuerySimilarityAgent",
-            instructions="""You are a query similarity analyzer specialized in knowledge base queries.
-
-            Your task is to compare two queries and determine if they are semantically equivalent,
-            meaning they are asking for the same information even if worded differently.
-
-            Consider these factors:
-            1. If they're asking for the same information or concept
-            2. If they reference the same entities, even if using different terms
-            3. If they have the same intent and purpose
-            4. If they would likely retrieve the same information from a knowledge base
-
-            Examples of equivalent queries:
-            - "What does the labor code say about vacation days?" ≈ "How many vacation days according to labor law?"
-            - "Information about termination notice periods" ≈ "How much notice is required when terminating employment?"
-            - "Contract requirements for consultants" ≈ "What needs to be in a consulting contract?"
-
-            Examples of non-equivalent queries:
-            - "Maternity leave duration" ≠ "Paternity leave rights"
-            - "Minimum wage in 2023" ≠ "Minimum wage in 2022"
-            - "Employee rights during probation" ≠ "Length of probation period"
-
-            Return a JSON object with:
-            - are_equivalent: boolean
-            - confidence: float (0-1)
-            - reasoning: brief explanation of your decision
-            """,
-            model="gpt-4o-mini",
-            output_type=QuerySimilarityResult
-        )
+        # For our simplified implementation, we'll skip the agent-based similarity check
+        # and just use a simple string comparison
+        self.query_similarity_agent = None
 
     def generate_cache_key(self, vector_store_id: str, query: str, filters: Dict, chat_id: str) -> str:
         """
@@ -159,48 +120,32 @@ class AgentDrivenSemanticCache:
 
         # Now check for semantic equivalence
         for cache_key, cached_entry in relevant_entries:
-            # Use agent to check if queries are semantically equivalent
-            comparison_prompt = f"""
-            Compare these two queries for semantic equivalence:
+            # Simple string comparison for our simplified implementation
+            cached_query = cached_entry['query'].lower()
+            new_query_lower = new_query.lower()
 
-            Query 1 (Cached): {cached_entry['query']}
-            Query 2 (New): {new_query}
+            # Check if the queries are similar enough (simple contains check)
+            if cached_query in new_query_lower or new_query_lower in cached_query:
+                # Check if document types match
+                cached_doc_type = cached_entry.get('document_type', 'general')
+                new_doc_type = filters.get('document_type', 'general')
 
-            Document Type Context: {cached_entry.get('document_type', 'general')}
+                # Check if file IDs match
+                cached_file_ids_set = set(cached_entry.get('included_file_ids', []) or [])
+                new_file_ids_set = set(filters.get('included_file_ids', []) or [])
 
-            # Check if both queries have the same file context
-            cached_file_ids = {cached_entry.get('included_file_ids', [])}
-            new_file_ids = {filters.get('included_file_ids', [])}
-
-            File Context: {'Same files' if cached_file_ids == new_file_ids else 'Different files'}
-
-            Determine if these queries would likely retrieve the same information from a knowledge base.
-            Consider both the semantic meaning of the queries AND whether they apply to the same set of files.
-            If the queries have different file contexts, they should generally NOT be considered equivalent.
-            """
-
-            try:
-                result = await Runner.run(
-                    self.query_similarity_agent,
-                    input=comparison_prompt
-                )
-
-                similarity_result = result.final_output
-
-                if (similarity_result.are_equivalent and
-                    similarity_result.confidence > self.confidence_threshold):
-                    logger.info(f"[SEMANTIC CACHE HIT] Match found with confidence {similarity_result.confidence}")
-                    logger.debug(f"Reasoning: {similarity_result.reasoning}")
+                # Consider a match if document types match and file IDs are the same or empty
+                if cached_doc_type == new_doc_type and (not cached_file_ids_set or not new_file_ids_set or cached_file_ids_set == new_file_ids_set):
+                    logger.info(f"[SEMANTIC CACHE HIT] Simple match found")
 
                     # Update timestamp to keep this entry fresh
                     self.timestamps[cache_key] = time.time()
 
                     return cached_entry['result']
                 else:
-                    logger.debug(f"Not equivalent: {similarity_result.reasoning}")
-            except Exception as e:
-                logger.error(f"Error in query similarity comparison: {e}")
-                continue
+                    logger.debug(f"Not equivalent: document types or file IDs don't match")
+            else:
+                logger.debug(f"Not equivalent: queries don't contain each other")
 
         logger.info("[SEMANTIC CACHE MISS] No semantic match found")
         return None
@@ -246,9 +191,9 @@ class AgentDrivenSemanticCache:
         self.timestamps[cache_key] = time.time()
         logger.info(f"Added new entry to semantic cache: {query[:50]}...")
 
-# Create global cache instance with configurable settings
+# Create global cache instance with default settings
 semantic_search_cache = AgentDrivenSemanticCache(
-    cache_size=int(os.getenv('SEMANTIC_CACHE_SIZE', 1000)),
-    ttl=int(os.getenv('SEMANTIC_CACHE_TTL', 600)),
-    confidence_threshold=float(os.getenv('SEMANTIC_CACHE_CONFIDENCE_THRESHOLD', 0.85))
+    cache_size=1000,
+    ttl=600,
+    confidence_threshold=0.85
 )

@@ -1,0 +1,1 @@
+{"query_patterns": {"kb_query": {"steps": ["call_tool:list_knowledge_base_files"], "success_count": 1, "last_used": "2025-04-25"}}, "_last_updated": 1745591712.59753}

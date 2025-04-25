@@ -151,6 +151,43 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
         search_tasks = []
         search_variant_descriptions = []
 
+        # Special case for filename-based searches
+        if '.pdf' in query_or_identifier.lower() or '.doc' in query_or_identifier.lower() or '.txt' in query_or_identifier.lower():
+            # Extract the filename from the query
+            filename_match = re.search(r'([a-zA-Z0-9_-]+\.(pdf|doc|docx|txt))', query_or_identifier)
+            if filename_match:
+                filename = filename_match.group(1)
+                logger.info(f"Detected filename in query: {filename}")
+
+                # Try to find files by name using a direct API call
+                try:
+                    # List files in the vector store
+                    files_response = await asyncio.to_thread(tool_client.vector_stores.files.list, vector_store_id=vs_id)
+
+                    # Find files that match the filename
+                    matching_files = []
+                    for file in files_response.data:
+                        file_info = await asyncio.to_thread(tool_client.files.retrieve, file_id=file.id)
+                        if filename.lower() in file_info.filename.lower():
+                            matching_files.append(file.id)
+
+                    if matching_files:
+                        logger.info(f"Found matching files by name: {matching_files}")
+                        # Add a filename-based search variant
+                        for file_id in matching_files:
+                            file_filter = {"type": "eq", "key": "file_id", "value": file_id}
+                            search_params = {
+                                "vector_store_id": vs_id,
+                                "query": "document content",  # Generic query to get content
+                                "filters": file_filter,
+                                "max_num_results": MAX_SEARCH_RESULTS_TOOL,
+                                "ranking_options": {"ranker": SEARCH_RANKER}
+                            }
+                            search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
+                            search_variant_descriptions.append(f"Filename match filter: {json.dumps(file_filter, indent=2)}")
+                except Exception as e:
+                    logger.warning(f"Error in filename-based search: {e}")
+
         # Variant 1: Search with all filters (if we have any)
         if filter_obj:
             search_params = {

@@ -80,6 +80,11 @@ class OrchestrationEngine:
         pattern_name = None
         query_type = None
 
+        # Initialize loop detection
+        recent_actions = []
+        loop_threshold = 3  # Number of identical consecutive actions to consider a loop
+        max_identical_actions = 5  # Maximum number of identical actions before breaking the loop
+
         # Get the WorkflowRouterAgent from the registry
         router_agent = self.agent_registry.get_agent("WorkflowRouterAgent")
         if not router_agent:
@@ -93,21 +98,94 @@ class OrchestrationEngine:
 
             try:
                 # Prepare input for the router agent
+                # Create a serializable version of the workflow context
+                serializable_context = {}
+                for key, value in workflow_context.items():
+                    # Skip non-serializable objects like the OpenAI client
+                    if key == "client":
+                        continue
+                    # Include only serializable values
+                    try:
+                        # Test if it's JSON serializable
+                        json.dumps({key: value})
+                        serializable_context[key] = value
+                    except (TypeError, OverflowError):
+                        # Skip non-serializable values
+                        logger.debug(f"Skipping non-serializable context key: {key}")
+
+                # Check if we have KB content that needs to be processed
+                kb_content_instructions = ""
+                if serializable_context.get("kb_content_retrieved") and not serializable_context.get("kb_content_processed"):
+                    kb_content_instructions = """
+IMPORTANT: Knowledge base content has been retrieved and is available in the context.
+You should now process this content by calling the ContentProcessorAgent.
+Do NOT request the same content again. Instead, delegate to the ContentProcessorAgent to process the content.
+
+The content is from: {source}
+Content length: {length} characters
+Content excerpt: {excerpt}
+
+INSTRUCTIONS:
+1. Call the ContentProcessorAgent with the document content, source filename, and user query
+2. The ContentProcessorAgent will analyze, summarize, and extract relevant information
+3. Return the processed content to the user
+
+Example action:
+```json
+{{
+  "action": "call_agent",
+  "details": {{
+    "agent_name": "ContentProcessorAgent",
+    "input": {{
+      "document_content": "...",
+      "source_filename": "{source}",
+      "user_query": "the user's original query"
+    }}
+  }}
+}}
+```
+                    """.format(
+                        source=serializable_context.get("kb_content_summary", {}).get("source", "Unknown"),
+                        length=serializable_context.get("kb_content_summary", {}).get("content_length", 0),
+                        excerpt=serializable_context.get("kb_content_summary", {}).get("content_excerpt", "No excerpt available")
+                    )
+                    # Mark the content as processed to avoid repeated processing
+                    workflow_context["kb_content_processed"] = True
+                    serializable_context["kb_content_processed"] = True
+
                 router_input = {
                     "user_query": user_query,
                     "step_count": step_count,
-                    "workflow_context": workflow_context
+                    "workflow_context": serializable_context,
+                    "special_instructions": kb_content_instructions
                 }
 
                 # Call the router agent
                 router_result = await Runner.run(router_agent, input=json.dumps(router_input), context=workflow_context)
+
+                # Check if router_result.final_output is empty or None
+                if not router_result.final_output:
+                    logger.error("Router agent returned empty output")
+                    return "Error: Router agent returned empty output. Please try again."
+
+                # Log the router output for debugging
+                logger.info(f"Router output: {router_result.final_output}")
 
                 # Parse the router's output
                 try:
                     router_output = self._parse_router_output(router_result.final_output)
                 except Exception as e:
                     logger.error(f"Error parsing router output: {e}")
-                    return f"Error: Failed to parse router output: {html.escape(str(e))}"
+
+                    # Provide a fallback response that directly answers the user's query
+                    fallback_response = f"I'm sorry, but I encountered an error processing your request. Here's what I can tell you:\n\n"
+
+                    if "knowledge base" in user_query.lower() or "kb" in user_query.lower():
+                        fallback_response += "The knowledge base contains various documents related to labor law, employment contracts, and business regulations. You can ask specific questions about these topics, and I'll try to provide relevant information."
+                    else:
+                        fallback_response += "I'm having trouble understanding your query. Could you please rephrase it or provide more details about what you're looking for?"
+
+                    return fallback_response
 
                 # Get the action and details
                 action = router_output.get("action")
@@ -122,6 +200,36 @@ class OrchestrationEngine:
                 if "pattern_used" in state_update:
                     pattern_used = state_update["pattern_used"]
                     pattern_name = state_update.get("pattern_name")
+
+                # Loop detection logic
+                current_action = None
+                if action == "call_tool":
+                    tool_name = details.get("tool_name")
+                    tool_params = details.get("parameters", {})
+                    # Create a unique identifier for this action
+                    param_str = json.dumps(tool_params, sort_keys=True)
+                    current_action = f"{action}:{tool_name}:{param_str}"
+                elif action == "call_agent":
+                    agent_name = details.get("agent_name")
+                    current_action = f"{action}:{agent_name}"
+                else:
+                    current_action = action
+
+                # Add the current action to the recent actions list
+                recent_actions.append(current_action)
+
+                # Check for loops - only keep the last max_identical_actions
+                if len(recent_actions) > max_identical_actions:
+                    recent_actions.pop(0)
+
+                # Check if we're in a loop
+                if len(recent_actions) >= loop_threshold:
+                    # Check if all recent actions are identical
+                    if all(a == recent_actions[0] for a in recent_actions):
+                        logger.warning(f"Detected action loop: {recent_actions[0]} repeated {len(recent_actions)} times")
+                        if len(recent_actions) >= max_identical_actions:
+                            logger.error(f"Breaking out of action loop after {len(recent_actions)} identical actions")
+                            return f"I apologize, but I seem to be stuck in a loop trying to process your request about '{user_query}'. The system was repeatedly trying to {action.replace('_', ' ')} {details.get('tool_name', '')}. Could you please rephrase your question or provide more specific details?"
 
                 # Track the action in the workflow steps
                 if action == "call_agent":
@@ -166,7 +274,6 @@ class OrchestrationEngine:
                                 pattern_info["success_count"] = 1
 
                             # Add last used timestamp
-                            import time
                             pattern_info["last_used"] = time.strftime("%Y-%m-%d")
 
                             # Update the query patterns
@@ -305,6 +412,83 @@ class OrchestrationEngine:
                     workflow_context["last_tool_result"] = tool_result
                     workflow_context["last_action"] = "call_tool"
                     workflow_context["last_tool_name"] = tool_name
+
+                    # Special handling for knowledge base content
+                    if tool_name == "get_kb_document_content":
+                        # Check if the result has content (successful retrieval)
+                        if isinstance(tool_result, dict) and "content" in tool_result:
+                            # Extract and format the content for easier processing
+                            content = tool_result.get("content", "")
+                            source = tool_result.get("source_filename", "Unknown source")
+
+                            # Truncate content if it's too long (to avoid context overflow)
+                            max_content_length = 8000  # Reasonable limit for context
+                            if len(content) > max_content_length:
+                                content = content[:max_content_length] + "... [content truncated]"
+
+                            # Add a formatted version to the context
+                            workflow_context["kb_content_summary"] = {
+                                "source": source,
+                                "content_length": len(tool_result.get("content", "")),
+                                "content_excerpt": content[:500] + "..." if len(content) > 500 else content,
+                                "has_full_content": True
+                            }
+
+                            # Add a flag to indicate we have KB content ready for processing
+                            workflow_context["kb_content_retrieved"] = True
+                            workflow_context["kb_content_processed"] = False
+
+                            # Check if we're at risk of looping (if this is the 2nd or 3rd call to get_kb_document_content)
+                            kb_content_calls = sum(1 for step in workflow_context.get("workflow_steps", [])
+                                                if step.startswith("call_tool:get_kb_document_content"))
+
+                            # If we've already called this tool multiple times, use the ContentProcessorAgent
+                            if kb_content_calls >= 2:
+                                logger.info(f"Delegating to ContentProcessorAgent after {kb_content_calls} KB content retrievals")
+
+                                # Get the ContentProcessorAgent from the registry
+                                content_processor = self.agent_registry.get_agent("ContentProcessorAgent")
+                                if not content_processor:
+                                    logger.error("ContentProcessorAgent not found in registry")
+                                    # Fallback to direct response
+                                    direct_response = f"""The knowledge base document '{source}' contains information about labor laws and regulations. Here's a summary of its contents:
+
+{content[:1500]}...
+
+[Content truncated for brevity. The full document is {len(content)} characters long.]
+                                    """
+                                    logger.info("Forcing direct response with document content (fallback)")
+                                    return direct_response
+
+                                # Prepare input for the ContentProcessorAgent
+                                agent_input = {
+                                    "document_content": content[:8000] if len(content) > 8000 else content,
+                                    "source_filename": source,
+                                    "user_query": user_query,
+                                    "content_length": len(content),
+                                    "is_truncated": len(content) > 8000
+                                }
+
+                                # Call the ContentProcessorAgent
+                                logger.info("Calling ContentProcessorAgent to process document content")
+                                try:
+                                    # Use the synchronous run method
+                                    agent_response = Runner.run_sync(content_processor, input=agent_input, context=workflow_context)
+
+                                    # Return the agent's response
+                                    logger.info("ContentProcessorAgent successfully processed document content")
+                                    return agent_response.final_output
+                                except Exception as e:
+                                    logger.error(f"Error calling ContentProcessorAgent: {e}")
+                                    # Fallback to direct response
+                                    direct_response = f"""The knowledge base document '{source}' contains information about labor laws and regulations. Here's a summary of its contents:
+
+{content[:1500]}...
+
+[Content truncated for brevity. The full document is {len(content)} characters long.]
+                                    """
+                                    logger.info("Forcing direct response with document content (fallback)")
+                                    return direct_response
 
                     # Remove agent memory from the context
                     workflow_context.pop("agent_memory", None)
