@@ -41,6 +41,9 @@ from agents.tracing import add_trace_processor # Correct registration function p
 # --- Agent Registry Imports ---
 from agents.registry import AgentRegistry, initialize_agent_registry
 
+# --- Workflow Registry Imports ---
+from core.workflow_registry import WorkflowRegistry, workflow_registry, initialize_workflow_registry
+
 # --- Enhanced Intent Determination ---
 from core.intent_determination import determine_final_intent, record_intent_determination
 
@@ -79,6 +82,14 @@ try:
 except Exception as e:
     logger.error(f"Error initializing agent registry: {e}")
     agent_registry = None
+
+# --- Initialize Workflow Registry ---
+try:
+    workflow_registry = initialize_workflow_registry()
+    logger.info(f"Workflow registry initialized with {len(workflow_registry.workflows)} workflows")
+except Exception as e:
+    logger.error(f"Error initializing workflow registry: {e}")
+    workflow_registry = None
 
 # --- Constants & Configurable Values ---
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
@@ -2271,42 +2282,44 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
     logger.info(f"Running Workflow. Query: '{user_query[:50]}...', TempFiles: {len(temp_files_info or [])}, Template: {template_to_populate}")
 
     try:
-        # 1. Determine Initial Intent (will be refined by QueryAnalyzerAgent)
-        intent = "kb_query"; details = {"query": user_query} # Default
-
-        # Run the QueryAnalyzerAgent to determine the true intent
-        logger.info("Running QueryAnalyzerAgent to determine true intent")
-        analyzer_input = {
+        # 1. Determine the next workflow using the WorkflowRouterAgent
+        logger.info("Running WorkflowRouterAgent to determine the next workflow")
+        router_input = {
             "user_query": user_query,
             "template_name": template_to_populate if template_to_populate else None,
             "has_temp_files": bool(temp_files_info),
-            "temp_file_names": [f['filename'] for f in temp_files_info] if temp_files_info else []
+            "temp_file_names": [f['filename'] for f in temp_files_info] if temp_files_info else [],
+            "history": history
         }
         # Log the model being used
         model, _ = get_model_with_fallback()
-        logger.info(f"Using model: {model} for query analysis")
+        logger.info(f"Using model: {model} for workflow routing")
 
-        # Get the QueryAnalyzerAgent from the registry
+        # Get the WorkflowRouterAgent from the registry
         if agent_registry:
-            query_analyzer = agent_registry.get_agent("QueryAnalyzerAgent")
-            if not query_analyzer:
-                logger.error("QueryAnalyzerAgent not found in registry, using fallback")
-                query_analyzer = query_analyzer_agent  # Fallback to hardcoded agent
+            workflow_router = agent_registry.get_agent("WorkflowRouterAgent")
+            if not workflow_router:
+                logger.error("WorkflowRouterAgent not found in registry, using fallback to QueryAnalyzerAgent")
+                # Fallback to QueryAnalyzerAgent if WorkflowRouterAgent is not available
+                workflow_router = agent_registry.get_agent("QueryAnalyzerAgent")
+                if not workflow_router:
+                    logger.error("QueryAnalyzerAgent not found in registry, using hardcoded agent")
+                    workflow_router = query_analyzer_agent  # Fallback to hardcoded agent
         else:
-            logger.error("Agent registry not initialized, using fallback")
-            query_analyzer = query_analyzer_agent  # Fallback to hardcoded agent
+            logger.error("Agent registry not initialized, using fallback to hardcoded agent")
+            workflow_router = query_analyzer_agent  # Fallback to hardcoded agent
 
-        analyzer_result = await Runner.run(query_analyzer, input=json.dumps(analyzer_input), context=workflow_context)
+        router_result = await Runner.run(workflow_router, input=json.dumps(router_input), context=workflow_context)
 
-        # Log the raw analyzer result
-        logger.info(f"QueryAnalyzerAgent raw result: {analyzer_result.final_output}")
+        # Log the raw router result
+        logger.info(f"WorkflowRouterAgent raw result: {router_result.final_output}")
 
-        # Parse the analyzer's output
+        # Parse the router's output
         try:
             # If the output is a string, try to parse it as JSON
-            if isinstance(analyzer_result.final_output, str):
+            if isinstance(router_result.final_output, str):
                 # Check if the output is wrapped in markdown code blocks
-                output_str = analyzer_result.final_output.strip()
+                output_str = router_result.final_output.strip()
 
                 # Extract JSON from markdown code blocks if present
                 if output_str.startswith('```') and '```' in output_str[3:]:
@@ -2403,43 +2416,106 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
                         intent = "kb_query"  # Default to kb_query
                         details = {"query": user_query}
             # If the output is already a dict, use it directly
-            elif isinstance(analyzer_result.final_output, dict):
-                analysis = analyzer_result.final_output
-                intent = analysis.get("intent", "kb_query")
-                details = analysis.get("details", {})
-            # If the output is an AnalysisResult object, use its attributes
-            elif hasattr(analyzer_result.final_output, "intent") and hasattr(analyzer_result.final_output, "details"):
-                intent = analyzer_result.final_output.intent
-                details = analyzer_result.final_output.details
+            elif isinstance(router_result.final_output, dict):
+                routing_decision = router_result.final_output
+                next_step = routing_decision.get("next_step", "workflow")
+                workflow_name = routing_decision.get("workflow_name", "kb_query_workflow")
+                parameters = routing_decision.get("parameters", {"query": user_query})
+
+                # For backward compatibility with the old intent-based system
+                # Map workflow names to intents
+                workflow_to_intent_map = {
+                    "kb_query_workflow": "kb_query",
+                    "temp_context_workflow": "temp_context_query",
+                    "kb_temp_context_workflow": "kb_query_with_temp_context",
+                    "template_population_workflow": "populate_template",
+                    "template_analysis_workflow": "analyze_template"
+                }
+
+                # Set intent and details for backward compatibility
+                intent = workflow_to_intent_map.get(workflow_name, "kb_query")
+                details = parameters
+            # If the output has next_step and workflow_name attributes
+            elif hasattr(router_result.final_output, "next_step") and hasattr(router_result.final_output, "workflow_name"):
+                next_step = router_result.final_output.next_step
+                workflow_name = router_result.final_output.workflow_name
+                parameters = getattr(router_result.final_output, "parameters", {"query": user_query})
+
+                # For backward compatibility with the old intent-based system
+                # Map workflow names to intents
+                workflow_to_intent_map = {
+                    "kb_query_workflow": "kb_query",
+                    "temp_context_workflow": "temp_context_query",
+                    "kb_temp_context_workflow": "kb_query_with_temp_context",
+                    "template_population_workflow": "populate_template",
+                    "template_analysis_workflow": "analyze_template"
+                }
+
+                # Set intent and details for backward compatibility
+                intent = workflow_to_intent_map.get(workflow_name, "kb_query")
+                details = parameters
+            # Fallback for backward compatibility with QueryAnalyzerAgent
+            elif hasattr(router_result.final_output, "intent") and hasattr(router_result.final_output, "details"):
+                intent = router_result.final_output.intent
+                details = router_result.final_output.details
+
+                # Map intents to workflow names
+                intent_to_workflow_map = {
+                    "kb_query": "kb_query_workflow",
+                    "temp_context_query": "temp_context_workflow",
+                    "kb_query_with_temp_context": "kb_temp_context_workflow",
+                    "populate_template": "template_population_workflow",
+                    "analyze_template": "template_analysis_workflow"
+                }
+
+                next_step = "workflow"
+                workflow_name = intent_to_workflow_map.get(intent, "kb_query_workflow")
+                parameters = details
             else:
-                logger.warning(f"Unexpected analyzer output type: {type(analyzer_result.final_output)}")
+                logger.warning(f"Unexpected router output type: {type(router_result.final_output)}")
                 intent = "kb_query"  # Default to kb_query
                 details = {"query": user_query}
+                next_step = "workflow"
+                workflow_name = "kb_query_workflow"
+                parameters = details
         except Exception as e:
-            logger.error(f"Error parsing analyzer output: {e}")
+            logger.error(f"Error parsing router output: {e}")
             intent = "kb_query"  # Default to kb_query
             details = {"query": user_query}
+            workflow_name = "kb_query_workflow"
+            parameters = details
 
-        # Add the original query to the details if not already present
+        # Add the original query to the details and parameters if not already present
         if "query" not in details:
             details["query"] = user_query
+        if "query" not in parameters:
+            parameters["query"] = user_query
 
-        # Log the determined intent and details
-        logger.info(f"Intent determined by analyzer: {intent}")
-        logger.info(f"Details determined by analyzer: {details}")
+        # Log the determined workflow and parameters
+        logger.info(f"Workflow determined by router: {workflow_name}")
+        logger.info(f"Parameters determined by router: {parameters}")
+
+        # For backward compatibility, also log the intent and details
+        logger.info(f"Intent (for backward compatibility): {intent}")
+        logger.info(f"Details (for backward compatibility): {details}")
 
         # Check for meta-query about KB contents
-        if intent == "kb_query":
+        if workflow_name == "kb_query_workflow" and parameters.get("kb_query_type") == "meta":
+            logger.info("Detected meta-query about KB contents")
+            workflow_context["kb_query_type"] = "meta"
+        elif intent == "kb_query":
+            # For backward compatibility, check using the old method
             # Import our local determine_final_intent function
             from core.app_intent import determine_final_intent as local_determine_intent
 
             # Use our local function to check for meta-query
-            _, local_details = local_determine_intent(analyzer_result.final_output)
+            _, local_details = local_determine_intent(router_result.final_output)
 
             # If it's a meta-query, add kb_query_type to the details and workflow context
             if local_details.get("kb_query_type") == "meta":
-                logger.info("Detected meta-query about KB contents")
+                logger.info("Detected meta-query about KB contents using backward compatibility")
                 details["kb_query_type"] = "meta"
+                parameters["kb_query_type"] = "meta"
                 workflow_context["kb_query_type"] = "meta"
 
         # Enhanced intent determination using our sophisticated LLM-based approach
@@ -2646,7 +2722,32 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
             details = {"template_name": template_to_populate, "required_fields": normalized_fields}
             required_fields = normalized_fields
 
-        # 2. Execute based on Intent
+        # 2. Execute the workflow based on the router's decision
+        if workflow_registry and workflow_name in workflow_registry.workflows:
+            logger.info(f"Executing workflow from registry: {workflow_name}")
+            try:
+                # Prepare the parameters for the workflow
+                workflow_params = {
+                    "user_query": user_query,
+                    "vs_id": vs_id,
+                    "history": history,
+                    "temp_files_info": temp_files_info,
+                    "template_to_populate": template_to_populate,
+                    "chat_id": chat_id,
+                    **parameters  # Add any additional parameters from the router
+                }
+
+                # Execute the workflow
+                final_markdown_response = await workflow_registry.execute_workflow(workflow_name, **workflow_params)
+                return final_markdown_response
+            except Exception as workflow_err:
+                logger.error(f"Error executing workflow {workflow_name}: {workflow_err}", exc_info=True)
+                return f"Sorry, an error occurred while executing the {workflow_name} workflow: {html.escape(str(workflow_err))}"
+
+        # Fallback to the old intent-based execution for backward compatibility
+        logger.info("Workflow registry not available or workflow not found, falling back to intent-based execution")
+
+        # 2. Execute based on Intent (backward compatibility)
         if intent == "populate_template":
             logger.info("Executing Template Population Workflow...")
             template_name = details.get("template_name")
