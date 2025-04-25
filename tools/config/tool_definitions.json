@@ -36,5 +36,24 @@
       "module": "tools.extraction_tools.data_extractor",
       "function": "extract_data_for_template"
     }
+  ,
+    {
+      "name": "get_agent_memory",
+      "description": "Get memory for an agent.",
+      "module": "tools.memory_tools.memory_tools",
+      "function": "get_agent_memory"
+    },
+    {
+      "name": "update_agent_memory",
+      "description": "Update memory for an agent.",
+      "module": "tools.memory_tools.memory_tools",
+      "function": "update_agent_memory"
+    },
+    {
+      "name": "add_to_agent_memory_list",
+      "description": "Add an item to a list in an agent's memory.",
+      "module": "tools.memory_tools.memory_tools",
+      "function": "add_to_agent_memory_list"
+    }
   ]
 }
