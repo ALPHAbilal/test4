@@ -41,8 +41,14 @@ from agents.tracing import add_trace_processor # Correct registration function p
 # --- Agent Registry Imports ---
 from agents.registry import AgentRegistry, initialize_agent_registry
 
+# --- Tool Registry Imports ---
+from tools.registry import ToolRegistry, initialize_tool_registry
+
 # --- Workflow Registry Imports ---
 from core.workflow_registry import WorkflowRegistry, workflow_registry, initialize_workflow_registry
+
+# --- Orchestration Engine Imports ---
+from core.orchestration import OrchestrationEngine, execute_orchestrated_workflow
 
 # --- Enhanced Intent Determination ---
 from core.intent_determination import determine_final_intent, record_intent_determination
@@ -82,6 +88,14 @@ try:
 except Exception as e:
     logger.error(f"Error initializing agent registry: {e}")
     agent_registry = None
+
+# --- Initialize Tool Registry ---
+try:
+    tool_registry = initialize_tool_registry()
+    logger.info(f"Tool registry initialized with {len(tool_registry.tools)} tools")
+except Exception as e:
+    logger.error(f"Error initializing tool registry: {e}")
+    tool_registry = None
 
 # --- Initialize Workflow Registry ---
 try:
@@ -2273,13 +2287,37 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
                                    template_to_populate: Optional[str] = None,
                                    chat_id: Optional[str] = None):
     """Orchestrates interaction between agents for complex RAG, including template population."""
+    logger.info(f"Running Workflow. Query: '{user_query[:50]}...', TempFiles: {len(temp_files_info or [])}, Template: {template_to_populate}")
+
+    # Check if we should use the new orchestration engine
+    use_orchestration = os.getenv('USE_ORCHESTRATION', 'false').lower() == 'true'
+
+    if use_orchestration and agent_registry:
+        logger.info("Using new orchestration engine for workflow execution")
+        try:
+            # Execute the workflow using the orchestration engine
+            return await execute_orchestrated_workflow(
+                user_query=user_query,
+                vs_id=vs_id,
+                history=history,
+                temp_files_info=temp_files_info,
+                template_to_populate=template_to_populate,
+                chat_id=chat_id,
+                agent_registry=agent_registry,
+                tool_registry=tool_registry
+            )
+        except Exception as e:
+            logger.error(f"Error executing orchestrated workflow: {e}", exc_info=True)
+            return f"Error executing workflow: {html.escape(str(e))}"
+
+    # Fallback to the old workflow implementation
+    logger.info("Using legacy workflow implementation")
     current_client = get_openai_client()
     if not current_client: raise ValueError("Client missing.")
     workflow_context = {"vector_store_id": vs_id, "client": current_client, "temp_files_info": temp_files_info or [], "history": history, "chat_id": chat_id}
     # Add the current query to the context
     workflow_context["current_query"] = user_query
     final_markdown_response = "Error: Workflow failed."
-    logger.info(f"Running Workflow. Query: '{user_query[:50]}...', TempFiles: {len(temp_files_info or [])}, Template: {template_to_populate}")
 
     try:
         # 1. Determine the next workflow using the WorkflowRouterAgent

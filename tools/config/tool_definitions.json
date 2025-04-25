@@ -1,0 +1,40 @@
+{
+  "tools": [
+    {
+      "name": "list_knowledge_base_files",
+      "description": "Lists all files in the knowledge base.",
+      "module": "tools.kb_tools.kb_listing",
+      "function": "list_knowledge_base_files"
+    },
+    {
+      "name": "get_kb_document_content",
+      "description": "Retrieves content from the knowledge base (Vector Store) based on document type and query/identifier.",
+      "module": "tools.kb_tools.kb_retrieval",
+      "function": "get_kb_document_content"
+    },
+    {
+      "name": "process_temp_file",
+      "description": "Reads and returns the text content of a previously uploaded temporary file for use as context.",
+      "module": "tools.file_tools.temp_file_processor",
+      "function": "process_temporary_file"
+    },
+    {
+      "name": "retrieve_template_content",
+      "description": "Retrieves the text content of a specified document template (txt, md, pdf).",
+      "module": "tools.template_tools.template_retrieval",
+      "function": "retrieve_template_content"
+    },
+    {
+      "name": "generate_docx_from_markdown",
+      "description": "Converts markdown content into a professionally formatted DOCX file.",
+      "module": "tools.template_tools.docx_generation",
+      "function": "generate_docx_from_markdown"
+    },
+    {
+      "name": "extract_data_for_template",
+      "description": "Extracts specific data fields required for a template from provided text context sources.",
+      "module": "tools.extraction_tools.data_extractor",
+      "function": "extract_data_for_template"
+    }
+  ]
+}
