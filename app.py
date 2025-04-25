@@ -8,7 +8,7 @@ import time
 import uuid
 import hashlib
 # Import PDF handling utilities
-from pymupdf_tools import extract_text_from_pdf
+from tools.pymupdf_tools import extract_text_from_pdf
 import traceback
 import re
 import markdown
@@ -24,7 +24,7 @@ from openai import (
 from typing import Optional, List, Dict, Any, Union
 
 # Import semantic cache for agent-driven query caching
-from semantic_cache import semantic_search_cache
+from data.semantic_cache import semantic_search_cache
 
 # --- Agent SDK Imports ---
 from agents import Agent, Runner, Handoff, RunContextWrapper, function_tool, AgentOutputSchema
@@ -39,15 +39,15 @@ from agents.tracing import add_trace_processor # Correct registration function p
 # --- END CORRECTED Imports ---
 
 # --- Enhanced Intent Determination ---
-from intent_determination import determine_final_intent, record_intent_determination
+from core.intent_determination import determine_final_intent, record_intent_determination
 
 # --- DocumentAnalyzerAgent Integration ---
 # Import the integration module (functions will be imported later)
-import document_analyzer_integration
+import core.document_analyzer_integration as document_analyzer_integration
 
 # Import tools from document_analyzer_agent
-from document_analyzer_agent import detect_fields_from_template, analyze_document_for_workflow
-from data_models import DocumentAnalysis
+from agents.document_analyzer_agent import detect_fields_from_template, analyze_document_for_workflow
+from data.data_models import DocumentAnalysis
 
 # --- Pydantic Models ---
 from pydantic import BaseModel, Field, ConfigDict
@@ -97,7 +97,7 @@ os.makedirs(TEMPLATE_DIR, exist_ok=True)
 
 # --- Database Setup ---
 try:
-    from chat_db import ChatHistoryDB
+    from data.chat_db import ChatHistoryDB
     chat_db = ChatHistoryDB(DATABASE_FILE)
     logger.info(f"ChatHistoryDB initialized with {DATABASE_FILE}")
 except Exception as db_init_err:
@@ -261,7 +261,7 @@ class RetrievalError(BaseModel):
     query_attempted: Optional[str] = Field(None, description="The query that was attempted")
 
 # Import the shared data model
-from data_models import ExtractedData
+from data.data_models import ExtractedData
 
 class FinalAnswer(BaseModel):
     markdown_response: str
@@ -2409,7 +2409,7 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
         # Check for meta-query about KB contents
         if intent == "kb_query":
             # Import our local determine_final_intent function
-            from app_intent import determine_final_intent as local_determine_intent
+            from core.app_intent import determine_final_intent as local_determine_intent
 
             # Use our local function to check for meta-query
             _, local_details = local_determine_intent(analyzer_result.final_output)
