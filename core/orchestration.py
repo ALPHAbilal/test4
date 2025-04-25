@@ -178,10 +178,29 @@ class OrchestrationEngine:
 
                     # Get agent memory if available
                     if memory_store:
-                        agent_memory = memory_store.get_memory(agent_name, workflow_context.get("chat_id"))
+                        # Create filter options based on the current query and context
+                        filter_options = {
+                            "max_size": 1024 * 25,  # 25KB max for memory in context
+                            "max_items_per_list": 10,
+                            "recency_days": 30,
+                            "relevance_query": workflow_context.get("current_query", ""),
+                            "max_entries_per_section": 10
+                        }
+
+                        # Get filtered memory
+                        agent_memory = memory_store.get_memory(
+                            agent_name,
+                            workflow_context.get("chat_id"),
+                            filter_options
+                        )
+
                         if agent_memory:
                             # Add agent memory to the context
                             workflow_context["agent_memory"] = agent_memory
+
+                            # Add a flag if memory was truncated
+                            if agent_memory.get("_memory_truncated"):
+                                workflow_context["_memory_truncated"] = True
 
                     # Call the agent
                     agent_result = await Runner.run(agent, input=json.dumps(agent_input), context=workflow_context)
@@ -231,10 +250,29 @@ class OrchestrationEngine:
                     if memory_store and tool_name in ["get_agent_memory", "update_agent_memory", "add_to_agent_memory_list"]:
                         agent_name = tool_parameters.get("agent_name") or workflow_context.get("current_agent_name")
                         if agent_name:
-                            agent_memory = memory_store.get_memory(agent_name, workflow_context.get("chat_id"))
+                            # Create filter options based on the current query and context
+                            filter_options = {
+                                "max_size": 1024 * 25,  # 25KB max for memory in context
+                                "max_items_per_list": 10,
+                                "recency_days": 30,
+                                "relevance_query": workflow_context.get("current_query", ""),
+                                "max_entries_per_section": 10
+                            }
+
+                            # Get filtered memory
+                            agent_memory = memory_store.get_memory(
+                                agent_name,
+                                workflow_context.get("chat_id"),
+                                filter_options
+                            )
+
                             if agent_memory:
                                 # Add agent memory to the context
                                 workflow_context["agent_memory"] = agent_memory
+
+                                # Add a flag if memory was truncated
+                                if agent_memory.get("_memory_truncated"):
+                                    workflow_context["_memory_truncated"] = True
 
                     # Create a context wrapper
                     ctx = RunContextWrapper(workflow_context)
