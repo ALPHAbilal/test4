@@ -64,6 +64,10 @@ class OrchestrationEngine:
         # Add the user query to the workflow context
         workflow_context["current_query"] = user_query
 
+        # Initialize workflow tracking if not already present
+        if "workflow_steps" not in workflow_context:
+            workflow_context["workflow_steps"] = []
+
         # Get the WorkflowRouterAgent from the registry
         router_agent = self.agent_registry.get_agent("WorkflowRouterAgent")
         if not router_agent:
@@ -98,8 +102,61 @@ class OrchestrationEngine:
                 details = router_output.get("details", {})
                 state_update = router_output.get("state_update", {})
 
+                # Track the action in the workflow steps
+                if action == "call_agent":
+                    workflow_context["workflow_steps"].append(f"call_agent:{details.get('agent_name')}")
+                elif action == "call_tool":
+                    workflow_context["workflow_steps"].append(f"call_tool:{details.get('tool_name')}")
+                elif action == "return_to_user":
+                    workflow_context["workflow_steps"].append("return_to_user")
+
                 # Update the workflow context with the state update
                 workflow_context.update(state_update)
+
+                # Check if this is the final step of a successful workflow
+                if action == "return_to_user" and state_update.get("workflow_success") == True:
+                    # Get the successful pattern
+                    successful_pattern = state_update.get("successful_pattern")
+                    current_query_type = state_update.get("current_query_type")
+
+                    if successful_pattern and current_query_type and memory_store:
+                        try:
+                            # Get the current agent name
+                            agent_name = "WorkflowRouterAgent"  # Default to WorkflowRouterAgent
+
+                            # Get the session ID
+                            session_id = workflow_context.get("chat_id")
+
+                            # Get the agent's memory
+                            agent_memory = memory_store.get_memory(agent_name, session_id) or {}
+
+                            # Get the query patterns
+                            query_patterns = agent_memory.get("query_patterns", {})
+
+                            # Update the query pattern
+                            pattern_info = query_patterns.get(current_query_type, {"steps": [], "success_count": 0})
+
+                            # If the pattern is the same, increment the success count
+                            if pattern_info["steps"] == successful_pattern:
+                                pattern_info["success_count"] += 1
+                            else:
+                                # If it's a new pattern, set the steps and reset the success count
+                                pattern_info["steps"] = successful_pattern
+                                pattern_info["success_count"] = 1
+
+                            # Add last used timestamp
+                            import time
+                            pattern_info["last_used"] = time.strftime("%Y-%m-%d")
+
+                            # Update the query patterns
+                            query_patterns[current_query_type] = pattern_info
+
+                            # Update the agent's memory
+                            memory_store.update_memory(agent_name, {"query_patterns": query_patterns}, session_id)
+
+                            logger.info(f"Updated query pattern for {current_query_type}: {pattern_info}")
+                        except Exception as e:
+                            logger.error(f"Error updating query pattern: {e}")
 
                 # Execute the action
                 if action == "call_agent":
