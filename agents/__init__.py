@@ -141,3 +141,21 @@ class Handoff:
 
 # Import items module
 from . import items
+
+# Try to import ContentProcessorAgent
+try:
+    # Create ContentProcessorAgent instance
+    content_processor_instructions = """
+You are a specialized content processing agent responsible for analyzing, summarizing, and extracting information from knowledge base documents. Your primary role is to process document content and provide meaningful, well-structured responses based on the user's query.
+"""
+    
+    ContentProcessorAgent = Agent(
+        name="ContentProcessorAgent",
+        instructions=content_processor_instructions,
+        model="gpt-4o-mini"
+    )
+except Exception as e:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.error(f"Failed to create ContentProcessorAgent: {e}")
+    ContentProcessorAgent = None

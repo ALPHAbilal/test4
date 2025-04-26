@@ -21,7 +21,7 @@
     {
       "name": "retrieve_template_content",
       "description": "Retrieves the text content of a specified document template (txt, md, pdf).",
-      "module": "tools.template_tools.template_retrieval",
+      "module": "app",
       "function": "retrieve_template_content"
     },
     {

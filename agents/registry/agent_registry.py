@@ -13,7 +13,21 @@ import importlib
 logger = logging.getLogger(__name__)
 
 # Import Agent class from OpenAI Agents SDK
-from agents import Agent, function_tool
+try:
+    from agents import Agent, function_tool
+    logger.info("Successfully imported Agent class from agents module")
+except ImportError:
+    logger.error("Failed to import Agent class from agents module")
+    # Define a fallback Agent class if needed
+    class Agent:
+        def __init__(self, name, instructions, model=None, tools=None, handoffs=None, model_settings=None, tool_use_behavior=None):
+            self.name = name
+            self.instructions = instructions
+            self.model = model
+            self.tools = tools
+            self.handoffs = handoffs
+            self.model_settings = model_settings
+            self.tool_use_behavior = tool_use_behavior
 
 # Import ToolRegistry
 try:
@@ -64,7 +78,7 @@ class AgentRegistry:
                 else:
                     logger.warning(f"Skipping agent definition without name: {agent_def}")
 
-            logger.info(f"Loaded {len(self.agent_definitions)} agent definitions from {config_path}")
+            logger.info(f"Loaded {len(self.agent_definitions)} agent definitions from {config_path}\n")
         except Exception as e:
             logger.error(f"Error loading agent definitions from {config_path}: {e}")
             raise
@@ -157,21 +171,56 @@ class AgentRegistry:
                     handoffs = self._resolve_handoffs(agent_def['handoffs'])
 
                 # Create the agent instance
-                agent = Agent(
-                    name=agent_def['name'],
-                    instructions=agent_def['instructions'],
-                    model=agent_def.get('model', 'gpt-4o-mini'),  # Default model
-                    tools=tools,
-                    handoffs=handoffs,
-                    model_settings=agent_def.get('model_settings'),
-                    tool_use_behavior=agent_def.get('tool_use_behavior')
-                )
+                try:
+                    agent = Agent(
+                        name=agent_def['name'],
+                        instructions=agent_def['instructions'],
+                        model=agent_def.get('model', 'gpt-4o-mini'),  # Default model
+                        tools=tools,
+                        handoffs=handoffs,
+                        model_settings=agent_def.get('model_settings'),
+                        tool_use_behavior=agent_def.get('tool_use_behavior')
+                    )
+                except Exception as agent_error:
+                    logger.error(f"Error creating agent instance for {agent_name}: {agent_error}")
+                    # Create a placeholder agent
+                    agent = Agent(
+                        name=agent_def['name'],
+                        instructions=agent_def['instructions'],
+                        model=agent_def.get('model', 'gpt-4o-mini')  # Default model with minimal parameters
+                    )
 
                 # Store the agent instance
                 self.agents[agent_name] = agent
                 logger.info(f"Instantiated agent: {agent_name}")
             except Exception as e:
                 logger.error(f"Error instantiating agent {agent_name}: {e}")
+
+        # Ensure critical agents are registered
+        if "ContentProcessorAgent" not in self.agents:
+            try:
+                # Try importing from our custom module first
+                logger.info("ContentProcessorAgent not found in definitions, trying to import from content_processor module")
+                try:
+                    from agents.content_processor import ContentProcessorAgent as CPAgent
+                    self.agents["ContentProcessorAgent"] = CPAgent
+                    logger.info("Successfully imported ContentProcessorAgent from content_processor module")
+                except ImportError:
+                    # Fall back to creating a simple agent
+                    logger.info("Creating a basic ContentProcessorAgent manually")
+                    # Use the Agent class we already have
+                    self.agents["ContentProcessorAgent"] = Agent(
+                        name="ContentProcessorAgent",
+                        instructions="""You are a specialized content processing agent responsible for analyzing, summarizing, and extracting information from knowledge base documents. Your primary role is to process document content and provide meaningful, well-structured responses based on the user's query.""",
+                        model="gpt-4o-mini"
+                    )
+                logger.info("Successfully registered ContentProcessorAgent")
+            except Exception as e:
+                logger.error(f"Error registering ContentProcessorAgent: {e}")
+
+        logger.info(f"Total agents registered: {len(self.agents)}")
+        if "ContentProcessorAgent" in self.agents:
+            logger.info("Confirmed ContentProcessorAgent is registered and available")
 
     def get_agent(self, agent_name: str) -> Optional[Agent]:
         """

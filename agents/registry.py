@@ -39,26 +39,23 @@ def initialize_agent_registry():
     registry = AgentRegistry()
 
     try:
-        # Try to load from the final updated definitions first
-        config_path = os.path.join('agents', 'config', 'agent_definitions_updated_final.json')
-
-        # If final updated definitions don't exist, try newest updated definitions
-        if not os.path.exists(config_path):
-            config_path = os.path.join('agents', 'config', 'agent_definitions_updated_new.json')
-
-        # If newest updated definitions don't exist, try updated definitions
-        if not os.path.exists(config_path):
-            config_path = os.path.join('agents', 'config', 'agent_definitions_updated.json')
-
-        # If updated definitions don't exist, try fixed definitions
-        if not os.path.exists(config_path):
-            config_path = os.path.join('agents', 'config', 'agent_definitions_fixed.json')
-
-        # If fixed definitions don't exist, fall back to original definitions
-        if not os.path.exists(config_path):
-            config_path = os.path.join('agents', 'config', 'agent_definitions.json')
-
-        if os.path.exists(config_path):
+        # Prioritize configurations with ContentProcessorAgent
+        config_paths = [
+            os.path.join('agents', 'config', 'agent_definitions_updated_final.json'),
+            os.path.join('agents', 'config', 'agent_definitions_updated_new.json'),
+            os.path.join('agents', 'config', 'agent_definitions_updated.json'),
+            os.path.join('agents', 'config', 'agent_definitions_fixed.json'),
+            os.path.join('agents', 'config', 'agent_definitions.json')
+        ]
+        
+        # Find the first existing config file
+        config_path = None
+        for path in config_paths:
+            if os.path.exists(path):
+                config_path = path
+                break
+                
+        if config_path:
             logger.info(f"Loading agent definitions from: {config_path}")
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -75,8 +72,21 @@ def initialize_agent_registry():
                         tools=agent_def.get('tools', [])
                     )
                     registry.register_agent(agent)
+                    
+            # Verify ContentProcessorAgent is registered
+            content_processor = registry.get_agent("ContentProcessorAgent")
+            if not content_processor:
+                logger.warning("ContentProcessorAgent not found in registry, creating manually")
+                # Create ContentProcessorAgent manually if not found
+                from agents import Agent
+                content_processor = Agent(
+                    name="ContentProcessorAgent",
+                    instructions="""You are a specialized content processing agent responsible for analyzing, summarizing, and extracting information from knowledge base documents. Your primary role is to process document content and provide meaningful, well-structured responses based on the user's query.""",
+                    model="gpt-4o-mini"
+                )
+                registry.register_agent(content_processor)
         else:
-            logger.warning(f"No agent configuration files found. Tried: agent_definitions_updated.json, agent_definitions_fixed.json, agent_definitions.json")
+            logger.warning(f"No agent configuration files found. Tried paths: {config_paths}")
     except Exception as e:
         logger.error(f"Error initializing agent registry: {e}")
 

@@ -15,6 +15,13 @@ import markdown
 import html
 import ast
 from dotenv import load_dotenv, find_dotenv
+
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO if os.getenv('FLASK_DEBUG') != '1' else logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s'
+)
+logger = logging.getLogger(__name__)
 from flask import Flask, render_template, request, flash, redirect, url_for, session, jsonify, send_file
 from werkzeug.utils import secure_filename
 from openai import (
@@ -39,7 +46,85 @@ from agents.tracing import add_trace_processor # Correct registration function p
 # --- END CORRECTED Imports ---
 
 # --- Agent Registry Imports ---
-from agents.registry import AgentRegistry, initialize_agent_registry
+try:
+    # Try importing from the updated registry structure
+    from agents.registry.registry_loader import initialize_agent_registry
+    logger.info("Using new agents registry structure")
+except ImportError:
+    # Fallback to the old registry
+    from agents.registry import AgentRegistry, initialize_agent_registry
+    logger.info("Using old agents registry structure")
+
+# Define retrieve_template_content function here to avoid circular imports
+# Import RunContextWrapper if not already imported
+from agents import RunContextWrapper
+
+# Define the RetrievalSuccess and RetrievalError classes if they're not already defined
+class RetrievalSuccess:
+    def __init__(self, content, source_filename, sources=None):
+        self.content = content
+        self.source_filename = source_filename
+        self.sources = sources or []
+
+class RetrievalError:
+    def __init__(self, error_message, details=None, query_attempted=None):
+        self.error_message = error_message
+        self.details = details
+        self.query_attempted = query_attempted
+
+@function_tool(strict_mode=False)
+async def retrieve_template_content(ctx: RunContextWrapper, template_name: str) -> Union[RetrievalSuccess, RetrievalError]:
+    """Retrieves the text content of a specified document template (txt, md, pdf)."""
+    logger.info(f"[Tool Call] retrieve_template_content: template_name='{template_name}'")
+    try:
+        # Use asyncio.to_thread to run the file operations asynchronously
+        async def process_template():
+            # Sanitize template_name but preserve extension
+            original_filename = secure_filename(template_name)
+            base_name, ext = os.path.splitext(original_filename)
+            if not ext: ext = ".md" # Default to markdown if no extension provided
+
+            # Check if extension is allowed for templates
+            allowed_template_exts = {'.txt', '.md', '.pdf'}
+            if ext.lower() not in allowed_template_exts:
+                logger.error(f"Attempted to retrieve template with unsupported extension: {original_filename}")
+                return RetrievalError(error_message=f"Unsupported template file type '{ext}'. Allowed: {', '.join(allowed_template_exts)}")
+
+            final_filename = f"{base_name}{ext}" # Reconstruct potentially sanitized name
+            template_path = os.path.join(TEMPLATE_DIR, final_filename)
+
+            # Security check: Ensure path is still within TEMPLATE_DIR
+            if not os.path.exists(template_path) or os.path.commonpath([TEMPLATE_DIR]) != os.path.commonpath([TEMPLATE_DIR, template_path]):
+                logger.error(f"[Tool Error] Template file not found or invalid path: {template_path}")
+                return RetrievalError(error_message=f"Template '{template_name}' not found.")
+
+            # --- Extract content based on type ---
+            content = ""
+            logger.info(f"Reading template file: {template_path}")
+            if ext.lower() == ".pdf":
+                # Use our robust PDF text extraction function
+                content = extract_text_from_pdf(template_path)
+            elif ext.lower() in [".txt", ".md"]:
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+            if not content:
+                logger.warning(f"Extracted empty content from template: {final_filename}")
+                return RetrievalError(error_message=f"Could not extract content from template '{final_filename}'.")
+
+            logger.info(f"[Tool Result] Retrieved template '{final_filename}'. Length: {len(content)}")
+            cleaned_content = re.sub(r'\s+', ' ', content).strip()
+            return RetrievalSuccess(content=cleaned_content, source_filename=f"Template: {original_filename}")
+
+        # Run the template processing function asynchronously
+        return await process_template()
+
+    except Exception as e:
+         logger.error(f"[Tool Error] Error retrieving template '{template_name}': {e}", exc_info=True)
+         return RetrievalError(error_message=f"Error retrieving template: {str(e)}")
+
+# Ensure ContentProcessorAgent is available
+from agents import ContentProcessorAgent
 
 # --- Tool Registry Imports ---
 from tools.registry import ToolRegistry, initialize_tool_registry
@@ -67,13 +152,6 @@ from pydantic import BaseModel, Field, ConfigDict
 # --- Load Configuration ---
 load_dotenv(find_dotenv(), override=True)
 
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO if os.getenv('FLASK_DEBUG') != '1' else logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 # --- App Setup ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY')
@@ -84,10 +162,53 @@ if not app.config['SECRET_KEY']:
 # --- Initialize Agent Registry ---
 try:
     agent_registry = initialize_agent_registry()
-    logger.info(f"Agent registry initialized with {len(agent_registry.agents)} agents")
+    logger.info(f"Agent registry initialized with {len(agent_registry.get_all_agents()) if hasattr(agent_registry, 'get_all_agents') else len(agent_registry.agents) if hasattr(agent_registry, 'agents') else '?'} agents")
 except Exception as e:
     logger.error(f"Error initializing agent registry: {e}")
     agent_registry = None
+
+# Ensure critical agents are registered
+if agent_registry:
+    # Check if ContentProcessorAgent is in the registry
+    if not agent_registry.get_agent("ContentProcessorAgent"):
+        logger.warning("ContentProcessorAgent not found in registry, adding manually")
+        agent_registry.agents["ContentProcessorAgent"] = ContentProcessorAgent
+
+    # Check if WorkflowRouterAgent is in the registry
+    if not agent_registry.get_agent("WorkflowRouterAgent"):
+        logger.warning("WorkflowRouterAgent not found in registry, adding manually")
+        from agents import Agent
+        workflow_router_agent = Agent(
+            name="WorkflowRouterAgent",
+            instructions="""You are a workflow orchestration agent responsible for determining the next step in processing a user query. Your job is to analyze the user's query, available templates, temporary files, conversation history, and the current state of the workflow to decide what action should be taken next.""",
+            model="gpt-4o-mini"
+        )
+        agent_registry.agents["WorkflowRouterAgent"] = workflow_router_agent
+        logger.info("Manually created and registered WorkflowRouterAgent")
+
+    # Check if QueryAnalyzerAgent is in the registry
+    if not agent_registry.get_agent("QueryAnalyzerAgent"):
+        logger.warning("QueryAnalyzerAgent not found in registry, adding manually")
+        from agents import Agent
+        query_analyzer_agent = Agent(
+            name="QueryAnalyzerAgent",
+            instructions="""Analyze the user's query, available templates, and temporary files to determine the true intent with high accuracy.""",
+            model="gpt-4o-mini"
+        )
+        agent_registry.agents["QueryAnalyzerAgent"] = query_analyzer_agent
+        logger.info("Manually created and registered QueryAnalyzerAgent")
+
+    # Check if DataGatheringAgentMinimal is in the registry
+    if not agent_registry.get_agent("DataGatheringAgentMinimal"):
+        logger.warning("DataGatheringAgentMinimal not found in registry, adding manually")
+        from agents import Agent
+        data_gathering_agent = Agent(
+            name="DataGatheringAgentMinimal",
+            instructions="""You are a specialized data gathering agent. Your job is to retrieve relevant information based on the user's query and intent.""",
+            model="gpt-4o-mini"
+        )
+        agent_registry.agents["DataGatheringAgentMinimal"] = data_gathering_agent
+        logger.info("Manually created and registered DataGatheringAgentMinimal")
 
 # --- Initialize Tool Registry ---
 try:
@@ -742,6 +863,21 @@ async def process_temporary_file(ctx: RunContextWrapper, filename: str) -> Union
     except Exception as e:
         logger.error(f"[Tool Error] Failed read/process temp file '{filename}': {e}", exc_info=True)
         return RetrievalError(error_message=f"Error processing temp file: {str(e)}")
+
+@function_tool(strict_mode=False)
+async def process_temp_file(ctx: RunContextWrapper, file_id: str = None, filename: str = None) -> Union[RetrievalSuccess, RetrievalError]:
+    """Alias for process_temporary_file that handles both file_id and filename parameters.
+    Reads and returns the text content of a previously uploaded temporary file for use as context."""
+    logger.info(f"[Tool Call] process_temp_file: file_id='{file_id}', filename='{filename}'")
+
+    # Use file_id as filename if provided, otherwise use filename
+    actual_filename = file_id if file_id is not None else filename
+
+    if actual_filename is None:
+        return RetrievalError(error_message="Either file_id or filename must be provided.")
+
+    # Call the original function with the determined filename
+    return await process_temporary_file(ctx, actual_filename)
 
 @function_tool(strict_mode=False)
 async def retrieve_template_content(ctx: RunContextWrapper, template_name: str) -> Union[RetrievalSuccess, RetrievalError]:

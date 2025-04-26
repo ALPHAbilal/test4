@@ -1,0 +1,1 @@
+{"query_patterns": {"document_analysis": {"steps": ["call_tool:get_kb_document_content", "call_agent:ContentProcessorAgent"], "success_count": 1, "last_used": "2025-04-26"}}, "_last_updated": 1745625978.7387893}
