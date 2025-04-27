@@ -6,12 +6,13 @@ This module provides tools for retrieving content from the knowledge base.
 
 import asyncio
 import logging
-import json
 import re
-import hashlib
-from typing import Dict, List, Any, Optional, Union, Callable
+from typing import List, Optional, Union
 from agents import function_tool, RunContextWrapper
 from pydantic import Field, BaseModel
+
+# Import sequential search implementation
+from tools.kb_tools.sequential_search import sequential_search_with_early_termination, prioritize_search_strategies
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,9 @@ except ImportError:
     # Default values if app.py cannot be imported
     MAX_SEARCH_RESULTS_TOOL = 5
     SEARCH_RANKER = "hybrid"
+
+# Global dictionary to track search strategy performance
+STRATEGY_METRICS = {}
 
 # Import semantic cache
 try:
@@ -147,9 +151,8 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
             # If single filter, use it directly
             filter_obj = filters[0]
 
-        # Define search variants to run in parallel
-        search_tasks = []
-        search_variant_descriptions = []
+        # Define search strategies for sequential execution
+        search_strategies = []
 
         # Special case for filename-based searches
         if '.pdf' in query_or_identifier.lower() or '.doc' in query_or_identifier.lower() or '.txt' in query_or_identifier.lower():
@@ -173,34 +176,70 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
 
                     if matching_files:
                         logger.info(f"Found matching files by name: {matching_files}")
-                        # Add a filename-based search variant
+                        # Add filename-based search strategies (high priority)
                         for file_id in matching_files:
                             file_filter = {"type": "eq", "key": "file_id", "value": file_id}
-                            search_params = {
-                                "vector_store_id": vs_id,
-                                "query": "document content",  # Generic query to get content
+                            search_strategies.append({
+                                "name": "filename_match",
+                                "description": f"Filename match filter: {filename}",
                                 "filters": file_filter,
-                                "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-                                "ranking_options": {"ranker": SEARCH_RANKER}
-                            }
-                            search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-                            search_variant_descriptions.append(f"Filename match filter: {json.dumps(file_filter, indent=2)}")
+                                "params": {
+                                    "max_num_results": MAX_SEARCH_RESULTS_TOOL,
+                                    "ranking_options": {"ranker": SEARCH_RANKER},
+                                    "query": "document content"  # Generic query to get content
+                                }
+                            })
                 except Exception as e:
                     logger.warning(f"Error in filename-based search: {e}")
 
-        # Variant 1: Search with all filters (if we have any)
-        if filter_obj:
-            search_params = {
-                "vector_store_id": vs_id,
-                "query": query_or_identifier,
-                "filters": filter_obj,
-                "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-                "ranking_options": {"ranker": SEARCH_RANKER}
-            }
-            search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-            search_variant_descriptions.append(f"All filters: {json.dumps(filter_obj, indent=2)}")
+        # Get query analysis if available
+        query_analysis = None
+        if 'query_analysis' in locals():
+            # Use the query analysis we just generated
+            pass
+        elif ctx:
+            # Try to get query analysis from context
+            if hasattr(ctx, "get") and ctx.get("query_analysis"):
+                # Context is a RunContextWrapper
+                query_analysis = ctx.get("query_analysis")
+            elif isinstance(ctx, dict) and "query_analysis" in ctx:
+                # Context is a dictionary
+                query_analysis = ctx["query_analysis"]
 
-        # Variant 2: Search with just file filters (if we have files to filter)
+        # Determine search parameters based on query analysis or system defaults
+        search_params = {
+            "max_num_results": MAX_SEARCH_RESULTS_TOOL,
+            "ranking_options": {"ranker": SEARCH_RANKER}
+        }
+
+        # Only add rewrite_query if we don't have query analysis
+        # Otherwise, let the query analysis determine this parameter
+        if not query_analysis:
+            search_params["rewrite_query"] = True
+
+        # Update parameters if query analysis is available
+        if query_analysis:
+            # Use recommended parameters from query analysis
+            if "recommended_max_results" in query_analysis:
+                search_params["max_num_results"] = min(query_analysis["recommended_max_results"], MAX_SEARCH_RESULTS_TOOL)
+
+            # Use search priority from query analysis
+            if "search_priority" in query_analysis:
+                if query_analysis["search_priority"] == "precision":
+                    search_params["ranking_options"] = {"ranker": "best_match"}
+                elif query_analysis["search_priority"] == "recall":
+                    search_params["ranking_options"] = {"ranker": "hybrid"}
+
+        # Strategy 1: Search with all filters (if we have any)
+        if filter_obj:
+            search_strategies.append({
+                "name": "all_filters",
+                "description": f"All filters combined",
+                "filters": filter_obj,
+                "params": search_params
+            })
+
+        # Strategy 2: Search with just file filters (if we have files to filter)
         if file_ids_to_filter:
             # Create file filter using supported filter types
             if len(file_ids_to_filter) == 1:
@@ -211,87 +250,129 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
                     file_filters.append({"type": "eq", "key": "id", "value": file_id})
                 file_filter = {"type": "or", "filters": file_filters}
 
-            # Only add this variant if it's different from the first one
+            # Only add this strategy if it's different from the first one
             if not filter_obj or filter_obj != file_filter:
-                search_params = {
-                    "vector_store_id": vs_id,
-                    "query": query_or_identifier,
+                search_strategies.append({
+                    "name": "file_only",
+                    "description": "File-only filter",
                     "filters": file_filter,
-                    "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-                    "ranking_options": {"ranker": SEARCH_RANKER}
-                }
-                search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-                search_variant_descriptions.append(f"File-only filter: {json.dumps(file_filter, indent=2)}")
+                    "params": search_params.copy()  # Use the same parameters
+                })
 
-        # Variant 3: Search with just document type filter (if specified and not general)
-        if document_type and document_type.lower() not in ["kb", "knowledge base", "general", "unknown", "none", ""]:
-            doc_type_filter = {"type": "eq", "key": "document_type", "value": document_type}
+        # Strategy 3: Search with just document type filter (if specified)
+        if document_type:
+            # Check if this is a general document type using query analysis
+            is_general_type = False
 
-            # Only add this variant if it's different from previous ones
-            if (not filter_obj or filter_obj != doc_type_filter) and (not file_ids_to_filter or doc_type_filter != file_filter):
-                search_params = {
-                    "vector_store_id": vs_id,
-                    "query": query_or_identifier,
-                    "filters": doc_type_filter,
-                    "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-                    "ranking_options": {"ranker": SEARCH_RANKER}
-                }
-                search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-                search_variant_descriptions.append(f"Document-type-only filter: {json.dumps(doc_type_filter, indent=2)}")
-
-        # Variant 4: Search without any filters (semantic fallback)
-        search_params = {
-            "vector_store_id": vs_id,
-            "query": query_or_identifier,
-            "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-            "ranking_options": {"ranker": SEARCH_RANKER}
-        }
-        search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-        search_variant_descriptions.append("No filters (semantic fallback)")
-
-        # Log the search variants
-        logger.info(f"[CACHE MISS] Running {len(search_tasks)} parallel search variants for query: '{query_or_identifier[:50]}...'")
-        for i, desc in enumerate(search_variant_descriptions):
-            logger.info(f"Search variant {i+1}: {desc}")
-
-        # Run all search variants in parallel
-        search_results_list = await asyncio.gather(*search_tasks)
-
-        # Process results from all variants
-        combined_results = []
-        result_counts = []
-
-        for i, results in enumerate(search_results_list):
-            if results and results.data:
-                count = len(results.data)
-                result_counts.append(count)
-                logger.info(f"Search variant {i+1} returned {count} results")
-                combined_results.extend(results.data)
+            if query_analysis and "general_document_types" in query_analysis:
+                # Use the agent's knowledge of general document types
+                general_types = query_analysis.get("general_document_types", [])
+                is_general_type = document_type.lower() in [t.lower() for t in general_types]
             else:
-                result_counts.append(0)
-                logger.info(f"Search variant {i+1} returned no results")
+                # Fallback check only if we don't have agent analysis
+                is_general_type = document_type.lower() in ["kb", "knowledge base", "general", "unknown", "none", ""]
 
-        # If we have any results, use them
-        if combined_results:
-            # Deduplicate results based on file_id and content hash
-            unique_results = {}
-            for res in combined_results:
-                # Create a unique key for each result based on file_id and content hash
-                content_hash = hashlib.md5(''.join(part.text for part in res.content if part.type == 'text').encode()).hexdigest()
-                key = f"{res.file_id}_{content_hash}"
+            # Only create a filter if it's not a general type
+            if not is_general_type:
+                doc_type_filter = {"type": "eq", "key": "document_type", "value": document_type}
 
-                # Only keep the result with the highest score if we have duplicates
-                if key not in unique_results or res.score > unique_results[key].score:
-                    unique_results[key] = res
+            # Only add this strategy if it's different from previous ones
+            if (not filter_obj or filter_obj != doc_type_filter) and (not file_ids_to_filter or doc_type_filter != file_filter):
+                # For document type searches, we might want to adjust parameters
+                doc_type_params = search_params.copy()
 
-            # Convert back to list and sort by score
-            deduplicated_results = list(unique_results.values())
-            deduplicated_results.sort(key=lambda x: x.score, reverse=True)
+                # If we have query analysis, check if this is the recommended document type
+                if query_analysis and query_analysis.get("document_type_hint") == document_type:
+                    # This is the recommended document type, increase max results
+                    doc_type_params["max_num_results"] = min(doc_type_params["max_num_results"] + 2, MAX_SEARCH_RESULTS_TOOL)
 
-            # Limit to MAX_SEARCH_RESULTS_TOOL
-            final_results = deduplicated_results[:MAX_SEARCH_RESULTS_TOOL]
+                search_strategies.append({
+                    "name": "document_type",
+                    "description": f"Document type filter: {document_type}",
+                    "filters": doc_type_filter,
+                    "params": doc_type_params
+                })
 
-            logger.info(f"Combined {sum(result_counts)} results, deduplicated to {len(deduplicated_results)}, returning top {len(final_results)}")
+        # Strategy 4: Search without any filters (semantic fallback)
+        # For semantic fallback, we might want different parameters
+        fallback_params = search_params.copy()
+
+        # If this is a summary request, we want more results from the fallback
+        if query_analysis and query_analysis.get("is_summary_request"):
+            fallback_params["max_num_results"] = min(fallback_params["max_num_results"] + 5, MAX_SEARCH_RESULTS_TOOL)
+
+        search_strategies.append({
+            "name": "semantic_fallback",
+            "description": "No filters (semantic fallback)",
+            "filters": None,
+            "params": fallback_params
+        })
+
+        # Prioritize strategies based on historical performance
+        global STRATEGY_METRICS
+        prioritized_strategies = prioritize_search_strategies(search_strategies, STRATEGY_METRICS)
+
+        # Log the search strategies
+        logger.info(f"[CACHE MISS] Running sequential search with early termination for query: '{query_or_identifier[:50]}...'")
+        logger.info(f"Search strategies in priority order: {', '.join([s['name'] for s in prioritized_strategies])}")
+
+        # Analyze the query using the QueryAnalyzerAgent
+        try:
+            from agents.query_analyzer_agent import analyze_query
+
+            # Create a context wrapper for the agent
+            from agents import RunContextWrapper
+            agent_context = RunContextWrapper({"client": tool_client})
+
+            # Analyze the query using the agent
+            query_analysis = await analyze_query(query_or_identifier, agent_context)
+
+            # Extract search parameters from analysis
+            min_results = query_analysis.get("recommended_min_results", 5)
+            max_results = min(query_analysis.get("recommended_max_results", 10), MAX_SEARCH_RESULTS_TOOL)
+
+            # Store query analysis in context for later use if possible
+            if hasattr(agent_context, "set"):
+                agent_context.set("query_analysis", query_analysis)
+            elif isinstance(agent_context, dict):
+                agent_context["query_analysis"] = query_analysis
+
+            logger.info(f"Query analysis: type={query_analysis.get('query_type', 'unknown')}, min_results={min_results}, max_results={max_results}, priority={query_analysis.get('search_priority', 'balanced')}")
+        except Exception as e:
+            logger.error(f"Error analyzing query, using default parameters: {e}")
+            # Default parameters if query analysis fails
+            min_results = 5
+            max_results = MAX_SEARCH_RESULTS_TOOL
+
+        # Execute sequential search with early termination
+        processed_results = await sequential_search_with_early_termination(
+            client=tool_client,
+            vector_store_id=vs_id,
+            query=query_or_identifier,
+            search_strategies=prioritized_strategies,
+            min_results_threshold=min_results,  # Adjusted based on query type
+            max_total_results=max_results,      # Adjusted based on query type
+            strategy_metrics=STRATEGY_METRICS,
+            context=ctx  # Pass the context for query analysis
+        )
+
+        # If we have any results, convert them to the expected format
+        if processed_results:
+            # Convert processed results to the format expected by the rest of the function
+            final_results = []
+
+            for result in processed_results:
+                # Create a dummy result object with the necessary attributes
+                result_obj = type('obj', (object,), {
+                    'file_id': result['file_id'],
+                    'score': result['score'],
+                    'content': [type('obj', (object,), {'type': 'text', 'text': result['content']})],
+                    'filename': result.get('metadata', {}).get('original_filename', f"FileID:{result['file_id'][-6:]}")
+                })
+
+                final_results.append(result_obj)
+
+            logger.info(f"Sequential search returned {len(final_results)} results")
 
             # Create a dummy search results object with our final results
             search_results = type('obj', (object,), {'data': final_results})
