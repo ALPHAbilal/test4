@@ -74,14 +74,21 @@ def initialize_agent_registry(config_path: Optional[str] = None, tool_config_pat
         # Check for ContentProcessorAgent
         content_processor = registry.get_agent("ContentProcessorAgent")
         if not content_processor:
-            logger.warning("ContentProcessorAgent not found in registry, creating manually")
-            # Create ContentProcessorAgent manually if not found
-            from agents import Agent
-            content_processor = Agent(
-                name="ContentProcessorAgent",
-                instructions="""You are a specialized content processing agent responsible for analyzing, summarizing, and extracting information from knowledge base documents. Your primary role is to process document content and provide meaningful, well-structured responses based on the user's query.""",
-                model="gpt-4o-mini"
-            )
+            logger.warning("ContentProcessorAgent not found in registry, importing from module")
+            try:
+                # Try to import from content_processor module
+                from agents.content_processor import ContentProcessorAgent
+                content_processor = ContentProcessorAgent
+                logger.info("Successfully imported ContentProcessorAgent from module")
+            except ImportError:
+                logger.warning("ContentProcessorAgent module not found, creating manually")
+                # Create ContentProcessorAgent manually if not found
+                from agents import Agent
+                content_processor = Agent(
+                    name="ContentProcessorAgent",
+                    instructions="""You are a specialized content processing agent responsible for analyzing, summarizing, and extracting information from knowledge base documents. Your primary role is to process document content and provide meaningful, well-structured responses based on the user's query.""",
+                    model="gpt-4o-mini"
+                )
             registry.agents["ContentProcessorAgent"] = content_processor
             logger.info("Manually created and registered ContentProcessorAgent")
 

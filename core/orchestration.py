@@ -342,18 +342,28 @@ This template serves as a legal framework to ensure employment contracts comply 
                             "is_truncated": len(content) > 8000
                         }
 
-                        # Call the ContentProcessorAgent
-                        logger.info("Calling ContentProcessorAgent to process document content")
+                        # Call the ContentProcessorAgent with enhanced synthesis
+                        logger.info("Calling ContentProcessorAgent with enhanced synthesis to process document content")
                         try:
                             # Mark as processed to prevent further loops
                             workflow_context["kb_content_processed"] = True
 
-                            # Use the synchronous run method
-                            agent_response = await Runner.run(content_processor, input=agent_input, context=workflow_context)
+                            # Try to use the enhanced synthesis function if available
+                            try:
+                                from agents.content_processor import process_content_with_synthesis
 
-                            # Return the agent's response
-                            logger.info("ContentProcessorAgent successfully processed document content")
-                            return agent_response.final_output
+                                # Call the enhanced synthesis function
+                                logger.info("Using enhanced response synthesis for document processing")
+                                response = await process_content_with_synthesis(agent_input, workflow_context)
+
+                                # Return the synthesized response
+                                logger.info("Enhanced content processing completed successfully")
+                                return response
+                            except ImportError:
+                                logger.warning("Enhanced synthesis function not available, falling back to standard agent")
+                                # Fall back to standard agent if enhanced synthesis is not available
+                                agent_response = await Runner.run(content_processor, input=agent_input, context=workflow_context)
+                                return agent_response.final_output
                         except Exception as e:
                             logger.error(f"Error calling ContentProcessorAgent: {e}")
 
@@ -458,6 +468,12 @@ This template serves as a legal framework to ensure employment contracts comply 
                     agent = self.agent_registry.get_agent(agent_name)
                     if not agent:
                         logger.error(f"Agent not found: {agent_name}")
+
+                        # Special handling for DocumentAnalyzerAgent
+                        if agent_name == "DocumentAnalyzerAgent":
+                            logger.error("DocumentAnalyzerAgent is required for document structure analysis")
+                            return f"Error: The DocumentAnalyzerAgent is not available to summarize the document structure."
+
                         return f"Error: Agent not found: {html.escape(agent_name)}"
 
                     # Add the agent name to the context
@@ -782,10 +798,14 @@ This template serves as a legal framework to ensure employment contracts comply 
 
                         # If it's a return_to_user action, try to extract the final_response
                         if action == "return_to_user":
-                            # Look for final_response
-                            response_match = re.search(r'"final_response"\s*:\s*"([^"]+(?:"[^"]+)*)"', json_str)
+                            # Look for final_response with a more robust pattern that can handle newlines and special chars
+                            response_pattern = r'"final_response"\s*:\s*"((?:[^"\\]|\\.|[\r\n])*)"'
+                            response_match = re.search(response_pattern, json_str, re.DOTALL)
+
                             if response_match:
                                 final_response = response_match.group(1)
+                                # Clean up escaped characters
+                                final_response = final_response.replace('\\n', '\n').replace('\\r', '\r').replace('\\"', '"')
                                 # Create a valid JSON object
                                 return {
                                     "action": "return_to_user",
@@ -796,13 +816,51 @@ This template serves as a legal framework to ensure employment contracts comply 
                                         "workflow_success": True
                                     }
                                 }
+                            else:
+                                # If we can't extract with regex, try a simpler approach - extract everything between final_response and the next field
+                                start_idx = json_str.find('"final_response"')
+                                if start_idx > 0:
+                                    # Find the first colon after final_response
+                                    colon_idx = json_str.find(':', start_idx)
+                                    if colon_idx > 0:
+                                        # Find the first quote after the colon
+                                        quote_idx = json_str.find('"', colon_idx)
+                                        if quote_idx > 0:
+                                            # Find the closing quote or the next field
+                                            next_field_idx = json_str.find('",', quote_idx + 1)
+                                            if next_field_idx > 0:
+                                                final_response = json_str[quote_idx + 1:next_field_idx]
+                                                return {
+                                                    "action": "return_to_user",
+                                                    "details": {
+                                                        "final_response": final_response
+                                                    },
+                                                    "state_update": {
+                                                        "workflow_success": True
+                                                    }
+                                                }
 
                     # If we couldn't extract the action or it's not return_to_user, create a fallback response
                     logger.warning(f"Creating fallback response due to JSON parsing error: {e}")
+
+                    # Try to extract any meaningful content from the malformed JSON
+                    content_start = json_str.find('"final_response"')
+                    extracted_content = "I apologize, but I encountered an error processing your request. Please try rephrasing your question."
+
+                    if content_start > 0:
+                        # Try to extract some content even if it's not valid JSON
+                        content_extract = json_str[content_start:content_start+500]
+                        # Clean it up a bit
+                        content_extract = content_extract.replace('"final_response":', '').strip()
+                        if content_extract.startswith('"'):
+                            content_extract = content_extract[1:]
+                        if len(content_extract) > 20:  # Only use if we got something substantial
+                            extracted_content = content_extract
+
                     return {
                         "action": "return_to_user",
                         "details": {
-                            "final_response": "I apologize, but I encountered an error processing your request. Please try rephrasing your question."
+                            "final_response": extracted_content
                         },
                         "state_update": {
                             "workflow_success": False,
