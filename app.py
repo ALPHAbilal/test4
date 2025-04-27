@@ -142,9 +142,13 @@ from core.intent_determination import determine_final_intent, record_intent_dete
 # Import the integration module (functions will be imported later)
 import core.document_analyzer_integration as document_analyzer_integration
 
-# Import tools from document_analyzer_agent
-from agents.document_analyzer_agent import detect_fields_from_template, analyze_document_for_workflow
+# Import tools and agent from document_analyzer_agent
+from agents.document_analyzer_agent import detect_fields_from_template, analyze_document_for_workflow, document_analyzer_agent
 from data.data_models import DocumentAnalysis
+
+# Ensure document_analyzer_agent is properly initialized
+if document_analyzer_agent:
+    logger.info(f"DocumentAnalyzerAgent imported successfully: {document_analyzer_agent.name}")
 
 # --- Pydantic Models ---
 from pydantic import BaseModel, Field, ConfigDict
@@ -210,6 +214,29 @@ if agent_registry:
         agent_registry.agents["DataGatheringAgentMinimal"] = data_gathering_agent
         logger.info("Manually created and registered DataGatheringAgentMinimal")
 
+    # Check if DocumentAnalyzerAgent is in the registry
+    if not agent_registry.get_agent("DocumentAnalyzerAgent"):
+        logger.warning("DocumentAnalyzerAgent not found in registry, adding manually")
+        try:
+            # Make sure document_analyzer_agent is properly initialized
+            if document_analyzer_agent and hasattr(document_analyzer_agent, 'name'):
+                agent_registry.agents["DocumentAnalyzerAgent"] = document_analyzer_agent
+                logger.info(f"Manually registered DocumentAnalyzerAgent: {document_analyzer_agent.name}")
+            else:
+                # Create a new instance if the imported one is not valid
+                from agents import Agent
+                logger.warning("Imported document_analyzer_agent is not valid, creating a new instance")
+                new_document_analyzer_agent = Agent(
+                    name="DocumentAnalyzerAgent",
+                    instructions="""You are a specialized document analyzer agent that understands document structure and extracts information using semantic understanding rather than pattern matching.""",
+                    model="gpt-4o-mini",
+                    tools=[detect_fields_from_template, analyze_document_for_workflow]
+                )
+                agent_registry.agents["DocumentAnalyzerAgent"] = new_document_analyzer_agent
+                logger.info("Created and registered a new DocumentAnalyzerAgent instance")
+        except Exception as e:
+            logger.error(f"Error registering DocumentAnalyzerAgent: {e}", exc_info=True)
+
 # --- Initialize Tool Registry ---
 try:
     tool_registry = initialize_tool_registry()
@@ -252,6 +279,10 @@ os.makedirs(DOCX_OUTPUT_DIR, exist_ok=True)
 # Ensure template directory exists
 os.makedirs(TEMPLATE_DIR, exist_ok=True)
 
+# Register blueprints
+from routes.search_routes import search_bp
+app.register_blueprint(search_bp)
+
 # --- Database Setup ---
 try:
     from data.chat_db import ChatHistoryDB
@@ -271,6 +302,9 @@ def get_openai_client() -> Optional[OpenAI]:
         try: client = OpenAI(api_key=api_key, timeout=45.0); logger.info("OpenAI client (re)initialized.")
         except Exception as e: logger.error(f"Failed to init OpenAI client: {e}", exc_info=True); client = None; return None
     return client
+
+# Make the get_openai_client function available to other modules
+app.get_openai_client = get_openai_client
 
 def get_model_with_fallback(preferred_model=COMPLETION_MODEL):
     """Get the preferred model with fallback to a more stable model if needed."""
@@ -347,14 +381,72 @@ async def add_files_to_vector_store(vector_store_id, file_paths_with_names, all_
             # --- Get attributes for THIS file from the dictionary passed in ---
             # Use filename as the key used in frontend JS
             file_metadata = all_metadata_dict.get(original_filename, {})
+
+            # Extract text content from the file for document analysis
+            file_content = ""
+            if temp_path.lower().endswith('.pdf'):
+                try:
+                    file_content = extract_text_from_pdf(temp_path)
+                    logger.info(f"Extracted {len(file_content)} characters from PDF for analysis")
+                except Exception as extract_err:
+                    logger.error(f"Error extracting text from PDF: {extract_err}", exc_info=True)
+
+            # Initialize attributes with user-provided values
             attributes = {
-                "document_type": file_metadata.get("document_type", "general"), # Default if missing
                 "language": file_metadata.get("language", "unknown"),       # Default if missing
                 "category": file_metadata.get("category") or "",             # Handle optional field
                 "original_filename": original_filename,
                 "upload_unix_ts": int(time.time()),
                 "processed_version": "1.1" # Indicate version using this upload method
             }
+
+            # Use document analyzer agent to detect document type
+            if file_content:
+                try:
+                    # Create a minimal context for the document analyzer
+                    analysis_ctx = RunContextWrapper({"client": current_client})
+
+                    # Call the document analyzer integration function
+                    logger.info(f"Analyzing document type for {original_filename}")
+                    analysis_result = await document_analyzer_integration.analyze_document_type_during_upload(
+                        analysis_ctx,
+                        file_content,
+                        original_filename
+                    )
+
+                    # Use the agent-detected document type instead of user-provided type
+                    if analysis_result.get("agent_analyzed", False):
+                        agent_doc_type = analysis_result.get("document_type", "general")
+                        confidence = analysis_result.get("confidence", 0.0)
+
+                        # Use the agent-detected document type
+                        attributes["document_type"] = agent_doc_type
+                        attributes["document_type_confidence"] = f"{confidence:.2f}"
+                        attributes["document_type_source"] = "agent"
+
+                        # Add any additional metadata from the analysis
+                        if "metadata" in analysis_result and analysis_result["metadata"]:
+                            for key, value in analysis_result["metadata"].items():
+                                if key not in attributes:
+                                    attributes[f"detected_{key}"] = value
+
+                        logger.info(f"Using agent-detected document type: {agent_doc_type} (confidence: {confidence:.2f})")
+                    else:
+                        # Fall back to user-provided document type
+                        attributes["document_type"] = file_metadata.get("document_type", "general")
+                        attributes["document_type_source"] = "user_fallback"
+                        logger.warning(f"Agent analysis failed, using user-provided document type: {attributes['document_type']}")
+                except Exception as analysis_err:
+                    # Fall back to user-provided document type
+                    attributes["document_type"] = file_metadata.get("document_type", "general")
+                    attributes["document_type_source"] = "user_fallback"
+                    logger.error(f"Error analyzing document type: {analysis_err}", exc_info=True)
+            else:
+                # No content extracted, use user-provided document type
+                attributes["document_type"] = file_metadata.get("document_type", "general")
+                attributes["document_type_source"] = "user_fallback"
+                logger.warning(f"No content extracted for analysis, using user-provided document type: {attributes['document_type']}")
+
             # Remove empty category if needed
             if not attributes["category"]: del attributes["category"]
             logger.info(f"Using attributes for {file_id}: {attributes}")
@@ -565,6 +657,18 @@ async def list_knowledge_base_files(ctx: RunContextWrapper, vs_id: Optional[str]
         logger.error(f"Error listing knowledge base files: {e}", exc_info=True)
         return {"error": f"Failed to list knowledge base files: {str(e)}"}
 
+def create_file_id_filter(file_ids):
+    """Helper function to create a filter for file IDs."""
+    if not file_ids:
+        return None
+    if len(file_ids) == 1:
+        return {"type": "eq", "key": "id", "value": file_ids[0]}
+    else:
+        file_filters = []
+        for file_id in file_ids:
+            file_filters.append({"type": "eq", "key": "id", "value": file_id})
+        return {"type": "or", "filters": file_filters}
+
 @function_tool(strict_mode=False)
 async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, query_or_identifier: str, included_file_ids: Optional[List[str]] = Field(None, description="Optional list of file IDs to limit the search/retrieval to.")) -> Union[RetrievalSuccess, RetrievalError]:
     """Retrieves content from the knowledge base (Vector Store) based on document type and query/identifier."""
@@ -620,161 +724,76 @@ async def get_kb_document_content(ctx: RunContextWrapper, document_type: str, qu
     except Exception as cache_err:
         logger.warning(f"Semantic cache lookup failed: {cache_err}. Falling back to direct search.")
 
-    # We've already determined file_ids_to_filter above, so we'll use that instead of fetching again
+    # Create a prioritized list of search strategies instead of parallel searches
+    search_strategies = []
 
-    # First try with a filter for more precise results
+    # Strategy 1: Both document type and file filters (most specific)
+    if document_type and document_type.lower() not in ["kb", "knowledge base", "general", "unknown", "none", ""] and file_ids_to_filter:
+        doc_filter = {"type": "eq", "key": "document_type", "value": document_type}
+        file_filter = create_file_id_filter(file_ids_to_filter)
+        combined_filter = {"type": "and", "filters": [doc_filter, file_filter]}
+        search_strategies.append({
+            "name": "document_type_and_files",
+            "filter": combined_filter,
+            "description": "Both document type and file filters"
+        })
+
+    # Strategy 2: Document type filter only
+    if document_type and document_type.lower() not in ["kb", "knowledge base", "general", "unknown", "none", ""]:
+        doc_filter = {"type": "eq", "key": "document_type", "value": document_type}
+        search_strategies.append({
+            "name": "document_type_only",
+            "filter": doc_filter,
+            "description": "Document type filter only"
+        })
+
+    # Strategy 3: File filter only
+    if file_ids_to_filter:
+        file_filter = create_file_id_filter(file_ids_to_filter)
+        search_strategies.append({
+            "name": "files_only",
+            "filter": file_filter,
+            "description": "File filter only"
+        })
+
+    # Strategy 4: No filters (semantic search)
+    search_strategies.append({
+        "name": "semantic_only",
+        "filter": None,
+        "description": "No filters (semantic search)"
+    })
+
+    # Try strategies in order until we get results
+    search_results = None
+    logger.info(f"[CACHE MISS] Trying {len(search_strategies)} search strategies in sequence for query: '{query_or_identifier[:50]}...'")
+
     try:
-        # Build filters
-        filters = []
-
-        # Add document type filter if specified and not a general type
-        if document_type and document_type.lower() not in ["kb", "knowledge base", "general", "unknown", "none", ""]:
-            logger.info(f"Adding document_type filter for: {document_type}")
-            filters.append({"type": "eq", "key": "document_type", "value": document_type})
-        else:
-            logger.info(f"Not filtering by document_type: '{document_type}' is considered general")
-
-        # Add file filter if we have files to filter
-        if file_ids_to_filter:
-            # OpenAI API doesn't support 'in' filter type, so we need to use 'or' with multiple 'eq' filters
-            if len(file_ids_to_filter) == 1:
-                # If only one file ID, use a simple 'eq' filter
-                filters.append({"type": "eq", "key": "id", "value": file_ids_to_filter[0]})
-            elif len(file_ids_to_filter) > 1:
-                # If multiple file IDs, use 'or' with multiple 'eq' filters
-                file_filters = []
-                for file_id in file_ids_to_filter:
-                    file_filters.append({"type": "eq", "key": "id", "value": file_id})
-
-                # Add the combined OR filter
-                if file_filters:
-                    filters.append({"type": "or", "filters": file_filters})
-
-        # Create filter object if we have any filters
-        filter_obj = None
-        if len(filters) > 1:
-            # If multiple filters, combine with AND
-            filter_obj = {"type": "and", "filters": filters}
-        elif len(filters) == 1:
-            # If single filter, use it directly
-            filter_obj = filters[0]
-
-        # Define search variants to run in parallel
-        search_tasks = []
-        search_variant_descriptions = []
-
-        # Variant 1: Search with all filters (if we have any)
-        if filter_obj:
+        for strategy in search_strategies:
             search_params = {
                 "vector_store_id": vs_id,
                 "query": query_or_identifier,
-                "filters": filter_obj,
                 "max_num_results": MAX_SEARCH_RESULTS_TOOL,
                 "ranking_options": {"ranker": SEARCH_RANKER}
             }
-            search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-            search_variant_descriptions.append(f"All filters: {json.dumps(filter_obj, indent=2)}")
 
-        # Variant 2: Search with just file filters (if we have files to filter)
-        if file_ids_to_filter:
-            # Create file filter using supported filter types
-            if len(file_ids_to_filter) == 1:
-                file_filter = {"type": "eq", "key": "id", "value": file_ids_to_filter[0]}
-            else:
-                file_filters = []
-                for file_id in file_ids_to_filter:
-                    file_filters.append({"type": "eq", "key": "id", "value": file_id})
-                file_filter = {"type": "or", "filters": file_filters}
+            if strategy["filter"]:
+                search_params["filters"] = strategy["filter"]
 
-            # Only add this variant if it's different from the first one
-            if not filter_obj or filter_obj != file_filter:
-                search_params = {
-                    "vector_store_id": vs_id,
-                    "query": query_or_identifier,
-                    "filters": file_filter,
-                    "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-                    "ranking_options": {"ranker": SEARCH_RANKER}
-                }
-                search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-                search_variant_descriptions.append(f"File-only filter: {json.dumps(file_filter, indent=2)}")
+            logger.info(f"Trying search strategy: {strategy['description']}")
 
-        # Variant 3: Search with just document type filter (if specified and not general)
-        if document_type and document_type.lower() not in ["kb", "knowledge base", "general", "unknown", "none", ""]:
-            doc_type_filter = {"type": "eq", "key": "document_type", "value": document_type}
+            try:
+                search_results = await asyncio.to_thread(tool_client.vector_stores.search, **search_params)
 
-            # Only add this variant if it's different from previous ones
-            if (not filter_obj or filter_obj != doc_type_filter) and (not file_ids_to_filter or doc_type_filter != file_filter):
-                search_params = {
-                    "vector_store_id": vs_id,
-                    "query": query_or_identifier,
-                    "filters": doc_type_filter,
-                    "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-                    "ranking_options": {"ranker": SEARCH_RANKER}
-                }
-                search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-                search_variant_descriptions.append(f"Document-type-only filter: {json.dumps(doc_type_filter, indent=2)}")
+                if search_results and search_results.data and len(search_results.data) > 0:
+                    logger.info(f"Strategy '{strategy['name']}' returned {len(search_results.data)} results")
+                    break
+                else:
+                    logger.info(f"Strategy '{strategy['name']}' returned no results, trying next strategy")
+            except Exception as strategy_err:
+                logger.warning(f"Error with search strategy '{strategy['name']}': {strategy_err}. Trying next strategy.")
+                continue
 
-        # Variant 4: Search without any filters (semantic fallback)
-        search_params = {
-            "vector_store_id": vs_id,
-            "query": query_or_identifier,
-            "max_num_results": MAX_SEARCH_RESULTS_TOOL,
-            "ranking_options": {"ranker": SEARCH_RANKER}
-        }
-        search_tasks.append(asyncio.to_thread(tool_client.vector_stores.search, **search_params))
-        search_variant_descriptions.append("No filters (semantic fallback)")
-
-        # Log the search variants
-        logger.info(f"[CACHE MISS] Running {len(search_tasks)} parallel search variants for query: '{query_or_identifier[:50]}...'")
-        for i, desc in enumerate(search_variant_descriptions):
-            logger.info(f"Search variant {i+1}: {desc}")
-
-        # Run all search variants in parallel
-        search_results_list = await asyncio.gather(*search_tasks)
-
-        # Process results from all variants
-        combined_results = []
-        result_counts = []
-
-        for i, results in enumerate(search_results_list):
-            if results and results.data:
-                count = len(results.data)
-                result_counts.append(count)
-                logger.info(f"Search variant {i+1} returned {count} results")
-                combined_results.extend(results.data)
-            else:
-                result_counts.append(0)
-                logger.info(f"Search variant {i+1} returned no results")
-
-        # If we have any results, use them
-        if combined_results:
-            # Deduplicate results based on file_id and content hash
-            unique_results = {}
-            for res in combined_results:
-                # Create a unique key for each result based on file_id and content hash
-                content_hash = hashlib.md5(''.join(part.text for part in res.content if part.type == 'text').encode()).hexdigest()
-                key = f"{res.file_id}_{content_hash}"
-
-                # Only keep the result with the highest score if we have duplicates
-                if key not in unique_results or res.score > unique_results[key].score:
-                    unique_results[key] = res
-
-            # Convert back to list and sort by score
-            deduplicated_results = list(unique_results.values())
-            deduplicated_results.sort(key=lambda x: x.score, reverse=True)
-
-            # Limit to MAX_SEARCH_RESULTS_TOOL
-            final_results = deduplicated_results[:MAX_SEARCH_RESULTS_TOOL]
-
-            logger.info(f"Combined {sum(result_counts)} results, deduplicated to {len(deduplicated_results)}, returning top {len(final_results)}")
-
-            # Create a dummy search results object with our final results
-            search_results = type('obj', (object,), {'data': final_results})
-        else:
-            # No results from any variant
-            search_results = None
-
-        if search_results and search_results.data:
+        if search_results and search_results.data and len(search_results.data) > 0:
             content = "\n\n".join(re.sub(r'\s+', ' ', part.text).strip() for res in search_results.data for part in res.content if part.type == 'text')
             source_filename = search_results.data[0].filename or f"FileID:{search_results.data[0].file_id[-6:]}"
             logger.info(f"[Tool Result] KB Content Found for query '{query_or_identifier[:30]}...'. Len: {len(content)}")
@@ -2425,6 +2444,98 @@ async def run_complex_rag_workflow(user_query: str, vs_id: str, history: List[Di
     """Orchestrates interaction between agents for complex RAG, including template population."""
     logger.info(f"Running Workflow. Query: '{user_query[:50]}...', TempFiles: {len(temp_files_info or [])}, Template: {template_to_populate}")
 
+    # Check if query mentions a document ID
+    from core.enhanced_search import extract_document_id_from_query
+    document_id = extract_document_id_from_query(user_query)
+
+    if document_id:
+        logger.info(f"Detected document ID in query: {document_id}")
+        try:
+            # Check if document map exists
+            from core.document_map_storage import get_document_map
+            document_map = await get_document_map(document_id)
+
+            if document_map:
+                logger.info(f"Found document map for {document_id}, using enhanced search")
+
+                # Create context for enhanced search
+                ctx = RunContextWrapper({"client": get_openai_client()})
+
+                # Use enhanced search
+                from core.enhanced_search import document_specific_search
+                search_results = await document_specific_search(ctx, user_query, document_id, vs_id)
+
+                # Format results for the final synthesizer
+                formatted_results = []
+                for result in search_results.get("results", []):
+                    content_text = ""
+                    if "content" in result:
+                        if hasattr(result["content"], "text"):
+                            content_text = result["content"].text
+                        elif hasattr(result["content"], "value"):
+                            content_text = result["content"].value
+                        elif isinstance(result["content"], str):
+                            content_text = result["content"]
+                        else:
+                            content_text = str(result["content"])
+
+                    section_info = ""
+                    if "section" in result:
+                        section_info = f" (Section: {result['section']})"
+
+                    formatted_results.append(f"[Document: {document_id}{section_info}]\n{content_text}\n")
+
+                # Create prompt for final synthesizer
+                if formatted_results:
+                    kb_content = "\n".join(formatted_results)
+
+                    # Add document map information
+                    kb_content += f"\n\nDocument Information:\n"
+                    kb_content += f"- Document Type: {document_map.get('document_type', 'Unknown')}\n"
+                    kb_content += f"- Total Parts: {document_map.get('total_parts', 0)}\n"
+
+                    # Add section information
+                    kb_content += f"\nDocument Sections:\n"
+                    for section in document_map.get("sections", []):
+                        kb_content += f"- {section.get('title', 'Untitled')}: {section.get('summary', 'No summary')}\n"
+                else:
+                    kb_content = f"No relevant content found in document {document_id} for your query."
+
+                # Create prompt for final synthesizer
+                prompt = f"""Answer the following question using ONLY the knowledge base content provided below.
+
+Question: {user_query}
+
+IMPORTANT: If the knowledge base content does not contain information to answer this question, clearly state this limitation. DO NOT fabricate or make up information that is not in the provided content. Accuracy is more important than helpfulness.
+
+Relevant Knowledge Base Content:
+{kb_content}
+"""
+
+                # Create messages for final synthesizer
+                synthesis_messages = history + [{
+                    "role": "user",
+                    "content": prompt
+                }]
+
+                # Run final synthesizer
+                model, _ = get_model_with_fallback()
+                logger.info(f"Using model: {model} for document-specific search synthesis")
+
+                workflow_context = {
+                    "chat_id": chat_id,
+                    "client": get_openai_client()
+                }
+
+                final_synth_raw = await Runner.run(final_synthesizer_agent, input=synthesis_messages, context=workflow_context)
+                final_markdown_response = extract_final_answer(final_synth_raw)
+
+                return final_markdown_response
+        except Exception as e:
+            logger.error(f"Error in enhanced document search: {e}", exc_info=True)
+            # Fall back to standard workflow
+
+    # Standard workflow
     logger.info("Using orchestration engine for workflow execution")
     try:
         # Execute the workflow using the orchestration engine
@@ -3196,6 +3307,105 @@ async def cache_stats_route():
         logger.error(f"Error getting cache stats: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route('/document_maps', methods=['GET'])
+async def list_document_maps_route():
+    """List all document maps"""
+    try:
+        from core.document_map_storage import list_document_maps
+        document_map_ids = await list_document_maps()
+        return jsonify({"document_map_ids": document_map_ids, "count": len(document_map_ids)})
+    except Exception as e:
+        logger.error(f"Error listing document maps: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/document_maps/<document_id>', methods=['GET'])
+async def get_document_map_route(document_id):
+    """Get a specific document map"""
+    try:
+        from core.document_map_storage import get_document_map
+        document_map = await get_document_map(document_id)
+        if document_map:
+            return jsonify(document_map)
+        else:
+            return jsonify({"status": "error", "message": f"Document map {document_id} not found"}), 404
+    except Exception as e:
+        logger.error(f"Error getting document map {document_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/view_document_maps', methods=['GET'])
+async def view_document_maps_route():
+    """View document maps UI"""
+    return render_template('document_maps.html')
+
+@app.route('/manage_vector_store/<vector_store_id>', methods=['GET'])
+async def manage_vector_store_route(vector_store_id):
+    """Manage a vector store and its files."""
+    try:
+        # Get the OpenAI client
+        client = get_openai_client()
+
+        # Get vector store details
+        vector_store = await asyncio.to_thread(client.vector_stores.retrieve, vector_store_id=vector_store_id)
+
+        # Get files in the vector store
+        files_response = await asyncio.to_thread(
+            client.vector_stores.files.list,
+            vector_store_id=vector_store_id,
+            limit=100  # Adjust as needed
+        )
+
+        # Render the template with vector store and files data
+        return render_template(
+            'manage_vector_store.html',
+            vector_store=vector_store,
+            files=files_response.data
+        )
+    except Exception as e:
+        logger.error(f"Error managing vector store {vector_store_id}: {e}")
+        flash(f"Error managing vector store: {str(e)}", "error")
+        return redirect(url_for('index'))
+
+@app.route('/delete_file_from_store', methods=['POST'])
+async def delete_file_from_store_route():
+    """Delete a file from a vector store."""
+    vector_store_id = request.form.get('vector_store_id', '').strip()
+    file_id = request.form.get('file_id', '').strip()
+
+    if not vector_store_id or not file_id:
+        flash("Vector store ID and file ID are required.", "error")
+        return redirect(request.referrer or url_for('index'))
+
+    try:
+        # Delete the file from the vector store
+        client = get_openai_client()
+        await asyncio.to_thread(
+            client.vector_stores.files.delete,
+            vector_store_id=vector_store_id,
+            file_id=file_id
+        )
+
+        # Flash success message
+        flash(f"File deleted successfully from vector store.", "success")
+
+        # Also delete the document map if it exists
+        document_id = request.form.get('document_id', '').strip()
+        if document_id:
+            try:
+                document_map_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                               "data", "document_maps", f"{document_id}.json")
+                if os.path.exists(document_map_path):
+                    os.remove(document_map_path)
+                    flash(f"Document map deleted successfully.", "success")
+            except Exception as map_error:
+                logger.error(f"Error deleting document map: {map_error}")
+                flash(f"Error deleting document map: {str(map_error)}", "warning")
+
+        return redirect(request.referrer or url_for('index'))
+    except Exception as e:
+        logger.error(f"Error deleting file from vector store: {e}")
+        flash(f"Error deleting file from vector store: {str(e)}", "error")
+        return redirect(request.referrer or url_for('index'))
+
 # --- Other Routes ---
 @app.route('/create_vector_store', methods=['POST'])
 async def create_vector_store_route():
@@ -3275,10 +3485,101 @@ async def upload_to_store_route():
         return redirect(request.referrer or url_for('index'))
     if not saved_files_info: flash("No valid files were processed.", "warning"); return redirect(request.referrer or url_for('index'))
 
-    # --- Call the modified function, passing the metadata dictionary ---
-    upload_result = await add_files_to_vector_store(vector_store_id, saved_files_info, all_file_metadata)
-    flash(upload_result["message"], upload_result["status"])
-    # Temporary files are cleaned up inside add_files_to_vector_store now
+    # Import the agent-based document analyzer
+    from core.agent_document_analyzer_integration import process_document_with_agent
+    from agents import RunContextWrapper
+
+    # Process each file with the agent-based document analyzer
+    processed_files = []
+    regular_files = []
+    success_count = 0
+    failure_count = 0
+
+    # Get the OpenAI client and create context
+    client = get_openai_client()
+    ctx = RunContextWrapper({"client": client})
+
+    for temp_path, original_filename in saved_files_info:
+        try:
+            # Process the document with agent-based analyzer
+            logger.info(f"Processing file {original_filename} for VS {vector_store_id}...")
+            result = await process_document_with_agent(ctx, temp_path, vector_store_id, original_filename)
+
+            if result["status"] == "success":
+                # Document processed successfully with document analyzer
+                processed_files.append(result)
+                success_count += 1
+                logger.info(f"Successfully processed document {original_filename} as {result['document_type']} (Document ID: {result['document_id']})")
+
+                # Upload each file part to the vector store
+                if "file_parts" in result:
+                    for part_path in result["file_parts"]:
+                        try:
+                            # Upload file to OpenAI
+                            with open(part_path, "rb") as file_data:
+                                file_response = client.files.create(
+                                    file=file_data,
+                                    purpose="assistants"
+                                )
+
+                            file_id = file_response.id
+                            logger.info(f"Uploaded '{os.path.basename(part_path)}' as File ID: {file_id}")
+
+                            # Create metadata for this part
+                            part_metadata = {
+                                "document_id": result["document_id"],
+                                "document_type": result["document_type"],
+                                "original_filename": original_filename,
+                                "upload_unix_ts": int(time.time()),
+                                "processed_version": "1.1"
+                            }
+
+                            # Associate file with vector store
+                            client.vector_stores.files.create(
+                                vector_store_id=vector_store_id,
+                                file_id=file_id,
+                                attributes=part_metadata
+                            )
+                        except Exception as upload_error:
+                            logger.error(f"Error uploading part {part_path} to vector store: {upload_error}")
+            elif result["status"] == "regular":
+                # Document analyzer failed, fall back to standard method
+                regular_files.append((temp_path, original_filename))
+                logger.info(f"Falling back to standard method for {original_filename}")
+            else:
+                # Error processing document
+                failure_count += 1
+                logger.error(f"Error processing document {original_filename}: {result.get('message', 'Unknown error')}")
+        except Exception as e:
+            failure_count += 1
+            logger.error(f"Error processing document {original_filename}: {e}")
+            # Add to regular files as fallback
+            regular_files.append((temp_path, original_filename))
+
+    # Process regular files with the standard method (only if enhanced analyzer failed)
+    if regular_files:
+        logger.info(f"Processing {len(regular_files)} files with standard method (enhanced analyzer failed)")
+        upload_result = await add_files_to_vector_store(vector_store_id, regular_files, all_file_metadata)
+
+        if upload_result["status"] == "success":
+            success_count += upload_result.get("success_count", 0)
+        else:
+            failure_count += upload_result.get("failure_count", 0)
+
+    # Generate result message
+    if processed_files:
+        for result in processed_files:
+            doc_size_info = "large " if result.get('is_large_document', False) else ""
+            flash(f"Successfully processed {doc_size_info}document '{result['original_filename']}' as {result['document_type']} (Document ID: {result['document_id']})", "success")
+            flash(f"Document map created with {result.get('total_parts', 1)} part(s) and sections analysis", "info")
+
+    if success_count > 0 and failure_count == 0:
+        flash(f"Successfully processed {success_count} documents with enhanced analyzer", "success")
+    elif success_count > 0 and failure_count > 0:
+        flash(f"Processed {success_count + failure_count} documents. Success: {success_count}, Failed: {failure_count}", "warning")
+    elif success_count == 0 and failure_count > 0:
+        flash(f"Failed to process {failure_count} documents", "error")
+
     return redirect(request.referrer or url_for('index')) # Redirect back
 
 # --- Custom Runner with Non-Strict Schema Validation ---

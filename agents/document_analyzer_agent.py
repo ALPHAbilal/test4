@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 
 # Import shared data models
-from data.data_models import DocumentAnalysis, DocumentSection
+from data.data_models import DocumentAnalysis
 
 from agents import Agent, Runner, function_tool, RunContextWrapper
 
@@ -20,8 +20,8 @@ from agents import Agent, Runner, function_tool, RunContextWrapper
 logger = logging.getLogger(__name__)
 
 # --- Data Models ---
-class DocumentSection(BaseModel):
-    """Section of a document"""
+class DocumentSectionInternal(BaseModel):
+    """Internal section of a document used for processing"""
     name: str
     start_index: Optional[int] = None
     end_index: Optional[int] = None
@@ -49,7 +49,7 @@ class DocumentMetadata(BaseModel):
 class DocumentStructure(BaseModel):
     """Document structure analysis result"""
     document_type: str
-    sections: List[DocumentSection]
+    sections: List[DocumentSectionInternal]
     metadata: DocumentMetadata
 
     model_config = {
@@ -109,6 +109,31 @@ async def analyze_document_structure(ctx: RunContextWrapper, document_content: s
             metadata=empty_metadata
         )
 
+    # For large documents, use the document sampling agent
+    document_size = len(document_content)
+    max_tokens = 4000  # Maximum tokens for analysis
+
+    if document_size > max_tokens:
+        logger.info(f"Document is large ({document_size} chars), using document sampling")
+        try:
+            # Import the document sampling function
+            from agents.document_sampling_agent import get_document_samples
+
+            # Get representative samples from the document
+            sampled_content, coverage = await get_document_samples(ctx, document_content, document_name, max_tokens)
+
+            # Use the sampled content for analysis
+            logger.info(f"Using sampled document content. Coverage: {coverage:.2f}")
+            analysis_content = sampled_content
+        except Exception as sampling_error:
+            logger.error(f"Error sampling document: {sampling_error}", exc_info=True)
+            # Fall back to using the beginning of the document
+            logger.warning(f"Falling back to using first {max_tokens} chars of document")
+            analysis_content = document_content[:max_tokens]
+    else:
+        # For small documents, use the full content
+        analysis_content = document_content
+
     # Use model to analyze document structure
     prompt = f"""
     Analyze the structure of this document and identify its type, sections, and organization.
@@ -116,7 +141,7 @@ async def analyze_document_structure(ctx: RunContextWrapper, document_content: s
     Document Name: {document_name}
 
     Document Content:
-    {document_content[:4000]}  # Limit content length
+    {analysis_content}
 
     Provide a detailed analysis including:
     1. Document type (e.g., employment_contract, invoice, ID_card, general_document)
@@ -130,13 +155,25 @@ async def analyze_document_structure(ctx: RunContextWrapper, document_content: s
     """
 
     try:
-        # Call the model
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",  # Use appropriate model
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
+        # Call the model - use asyncio.to_thread for synchronous client
+        try:
+            # Try async version first
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+        except TypeError:
+            # Fall back to synchronous version with asyncio.to_thread
+            import asyncio
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
 
         # Parse the response
         content = response.choices[0].message.content
@@ -146,7 +183,7 @@ async def analyze_document_structure(ctx: RunContextWrapper, document_content: s
         sections = []
         for section_data in structure_data.get("sections", []):
             try:
-                sections.append(DocumentSection(
+                sections.append(DocumentSectionInternal(
                     name=section_data.get("name", "Unnamed Section"),
                     start_index=section_data.get("start_index"),
                     end_index=section_data.get("end_index"),
@@ -155,7 +192,7 @@ async def analyze_document_structure(ctx: RunContextWrapper, document_content: s
             except Exception as section_error:
                 logger.warning(f"Error processing section: {section_error}")
                 # Add a simplified section if there's an error
-                sections.append(DocumentSection(
+                sections.append(DocumentSectionInternal(
                     name="Error Processing Section",
                     content=str(section_data)[:200]
                 ))
@@ -251,6 +288,35 @@ async def extract_fields_from_document(
         {json.dumps(metadata_dict, indent=2)}
         """
 
+    # For large documents, use the document sampling agent
+    document_size = len(document_content)
+    max_tokens = 6000  # Maximum tokens for extraction
+
+    if document_size > max_tokens:
+        logger.info(f"Document is large ({document_size} chars), using document sampling for field extraction")
+        try:
+            # Import the document sampling function
+            from agents.document_sampling_agent import get_document_samples
+
+            # Get representative samples from the document
+            document_name = document_structure.metadata.title if document_structure and document_structure.metadata.title else "Unknown Document"
+            sampled_content, coverage = await get_document_samples(ctx, document_content, document_name, max_tokens)
+
+            # Use the sampled content for extraction
+            logger.info(f"Using sampled document content for field extraction. Coverage: {coverage:.2f}")
+            analysis_content = sampled_content
+
+            # Add sampling information to structure info
+            structure_info += f"\n\nNote: Document has been sampled for analysis. Coverage: {coverage:.2f} of original content."
+        except Exception as sampling_error:
+            logger.error(f"Error sampling document: {sampling_error}", exc_info=True)
+            # Fall back to using the beginning of the document
+            logger.warning(f"Falling back to using first {max_tokens} chars of document")
+            analysis_content = document_content[:max_tokens]
+    else:
+        # For small documents, use the full content
+        analysis_content = document_content
+
     # Create field-specific guidelines based on document type
     field_guidelines = []
     for field in normalized_fields:
@@ -288,7 +354,7 @@ async def extract_fields_from_document(
     {structure_info}
 
     Document Content:
-    {document_content[:6000]}  # Limit content length
+    {analysis_content}
 
     User Query: {user_query}
 
@@ -307,13 +373,25 @@ async def extract_fields_from_document(
     """
 
     try:
-        # Call the model
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",  # Use appropriate model
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
+        # Call the model - use asyncio.to_thread for synchronous client
+        try:
+            # Try async version first
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+        except TypeError:
+            # Fall back to synchronous version with asyncio.to_thread
+            import asyncio
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
 
         # Parse the response
         content = response.choices[0].message.content
@@ -358,6 +436,15 @@ async def extract_fields_from_document(
                         alternatives=None
                     )
                 )
+
+        # If we used document sampling, adjust confidence scores
+        if document_size > max_tokens and 'coverage' in locals():
+            # Reduce confidence proportionally to coverage
+            for field in extracted_fields:
+                # Only reduce if confidence is already high
+                if field.confidence > 0.7:
+                    # Adjust confidence based on coverage, but don't reduce below 0.5
+                    field.confidence = max(0.5, field.confidence * coverage)
 
         # Create and return ExtractedDataResult
         return ExtractedDataResult(
@@ -426,13 +513,25 @@ async def detect_fields_from_template(ctx: RunContextWrapper, input_data: Dict) 
     """
 
     try:
-        # Call the model
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",  # Use appropriate model
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
+        # Call the model - use asyncio.to_thread for synchronous client
+        try:
+            # Try async version first
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+        except TypeError:
+            # Fall back to synchronous version with asyncio.to_thread
+            import asyncio
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
 
         # Parse the response
         content = response.choices[0].message.content
@@ -466,32 +565,92 @@ async def detect_fields_from_template(ctx: RunContextWrapper, input_data: Dict) 
         return []
 
 # --- Integration Function ---
-async def extract_data_for_template_agent_based(ctx, context_sources, required_fields, document_analyses=None):
+async def extract_data_for_template_agent_based(ctx: RunContextWrapper, context_sources: List[str], required_fields: List[str], document_analyses: Optional[List[Dict]] = None) -> Dict[str, Optional[str]]:
     """
     Extract data for a template using the document analyzer agent.
 
     Args:
-        ctx: The run context
-        context_sources: The context sources
-        required_fields: The required fields
-        document_analyses: Optional document analyses
+        ctx: The run context wrapper
+        context_sources: List of document contents
+        required_fields: List of fields to extract
+        document_analyses: Optional pre-computed document analyses
 
     Returns:
-        The extracted data
+        Dictionary of extracted fields
     """
     logger.info(f"Extracting data for template with {len(context_sources)} sources and {len(required_fields)} required fields")
 
-    # This is a placeholder implementation
-    extracted_fields = {}
+    # Initialize all fields to None
+    extracted_fields = {field: None for field in required_fields}
 
-    # Extract some basic fields if possible
-    for field in required_fields:
-        # For demonstration purposes, extract some fields from the context
-        for source in context_sources:
-            if isinstance(source, str) and field.lower() in source.lower():
-                # Very simple extraction - in a real implementation, this would be more sophisticated
-                extracted_fields[field] = f"Extracted {field} from context"
-                break
+    # If no context sources, return empty values
+    if not context_sources or len(context_sources) == 0:
+        logger.warning("No context provided for extraction")
+        return extracted_fields
+
+    try:
+        # For large documents, use the document sampling agent
+        combined_content = "\n\n".join(context_sources)
+        document_size = len(combined_content)
+        max_tokens = 4000  # Maximum tokens for extraction
+
+        if document_size > max_tokens:
+            logger.info(f"Combined content is large ({document_size} chars), using document sampling")
+            try:
+                # Import the document sampling function
+                from agents.document_sampling_agent import get_document_samples
+
+                # Get representative samples from the document
+                sampled_content, coverage = await get_document_samples(ctx, combined_content, "Template Data", max_tokens)
+
+                # Use the sampled content for extraction
+                logger.info(f"Using sampled content for template data extraction. Coverage: {coverage:.2f}")
+                analysis_content = sampled_content
+            except Exception as sampling_error:
+                logger.error(f"Error sampling document: {sampling_error}", exc_info=True)
+                # Fall back to using the beginning of the document
+                logger.warning(f"Falling back to using first {max_tokens} chars of document")
+                analysis_content = combined_content[:max_tokens]
+        else:
+            # For small documents, use the full content
+            analysis_content = combined_content
+
+        # Use document analyses if provided
+        doc_analysis_info = ""
+        if document_analyses:
+            logger.info(f"Using {len(document_analyses)} document analyses to guide extraction")
+            doc_analysis_info = "\n\nDocument Analysis Information:\n"
+            for i, analysis in enumerate(document_analyses):
+                doc_analysis_info += f"\nDocument {i+1}:\n"
+                doc_analysis_info += f"- Type: {analysis.get('doc_type', 'unknown')}\n"
+
+                # Add key sections if available
+                if 'key_sections' in analysis and analysis['key_sections']:
+                    doc_analysis_info += f"- Key Sections: {', '.join(analysis['key_sections'])}\n"
+
+        # Extract fields using the extract_fields_from_document function
+        result = await extract_fields_from_document(
+            ctx=ctx,
+            document_content=analysis_content,
+            required_fields=required_fields
+        )
+
+        # Convert the result to a simple dictionary
+        if result and result.fields:
+            for field in result.fields:
+                if field.value is not None:
+                    extracted_fields[field.field_name] = field.value
+
+        logger.info(f"Extracted {len([f for f in extracted_fields.values() if f is not None])}/{len(required_fields)} fields")
+
+    except Exception as e:
+        logger.error(f"Error in template extraction: {e}", exc_info=True)
+        # Fall back to simple extraction
+        for field in required_fields:
+            for source in context_sources:
+                if isinstance(source, str) and field.lower() in source.lower():
+                    extracted_fields[field] = f"Extracted {field} from context"
+                    break
 
     return extracted_fields
 
@@ -522,6 +681,31 @@ async def analyze_document_for_workflow(ctx: RunContextWrapper, document_content
             metadata={"error": "Configuration error"}
         )
 
+    # For large documents, use the document sampling agent
+    document_size = len(document_content)
+    max_tokens = 6000  # Maximum tokens for analysis
+
+    if document_size > max_tokens:
+        logger.info(f"Document is large ({document_size} chars), using document sampling")
+        try:
+            # Import the document sampling function
+            from agents.document_sampling_agent import get_document_samples
+
+            # Get representative samples from the document
+            sampled_content, coverage = await get_document_samples(ctx, document_content, document_name, max_tokens)
+
+            # Use the sampled content for analysis
+            logger.info(f"Using sampled document content. Coverage: {coverage:.2f}")
+            analysis_content = sampled_content
+        except Exception as sampling_error:
+            logger.error(f"Error sampling document: {sampling_error}", exc_info=True)
+            # Fall back to using the beginning of the document
+            logger.warning(f"Falling back to using first {max_tokens} chars of document")
+            analysis_content = document_content[:max_tokens]
+    else:
+        # For small documents, use the full content
+        analysis_content = document_content
+
     # Create a prompt that explicitly requests JSON output matching our model
     prompt = f"""
     Analyze the structure of this document and identify its type, sections, and organization.
@@ -529,7 +713,7 @@ async def analyze_document_for_workflow(ctx: RunContextWrapper, document_content
     Document Name: {document_name}
 
     Document Content:
-    {document_content[:6000]}  # Limit content length for better processing
+    {analysis_content}
 
     Provide a detailed analysis as a JSON object with these exact keys:
     - doc_type: The type of document (e.g., employment_contract, invoice, general_document)
@@ -546,13 +730,25 @@ async def analyze_document_for_workflow(ctx: RunContextWrapper, document_content
     """
 
     try:
-        # Call the model with explicit JSON response format
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",  # Use appropriate model
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
+        # Call the model with explicit JSON response format - use asyncio.to_thread for synchronous client
+        try:
+            # Try async version first
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+        except TypeError:
+            # Fall back to synchronous version with asyncio.to_thread
+            import asyncio
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",  # Use appropriate model
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
 
         # Parse the response
         content = response.choices[0].message.content
@@ -579,10 +775,11 @@ async def analyze_document_for_workflow(ctx: RunContextWrapper, document_content
         if "structure" in analysis_data and isinstance(analysis_data["structure"], list):
             for section_data in analysis_data["structure"]:
                 if isinstance(section_data, dict) and "name" in section_data and "content" in section_data:
-                    structure_sections.append(DocumentSection(
-                        name=section_data["name"],
-                        content=section_data["content"]
-                    ))
+                    # Create a dictionary instead of a DocumentSection object
+                    structure_sections.append({
+                        "name": section_data["name"],
+                        "content": section_data["content"]
+                    })
 
         # Process key sections
         key_sections = []
@@ -593,6 +790,11 @@ async def analyze_document_for_workflow(ctx: RunContextWrapper, document_content
         metadata = {}
         if "metadata" in analysis_data and isinstance(analysis_data["metadata"], dict):
             metadata = {str(k): str(v) for k, v in analysis_data["metadata"].items() if k and v}
+
+        # If we used document sampling, add that information to metadata
+        if document_size > max_tokens:
+            metadata["sampling_applied"] = "true"
+            metadata["document_coverage"] = f"{coverage:.2f}" if 'coverage' in locals() else "unknown"
 
         # Create and return DocumentAnalysis
         return DocumentAnalysis(
@@ -672,6 +874,34 @@ async def extract_data_for_template_agent_based(ctx: RunContextWrapper, context_
         logger.warning("No context provided for extraction")
         return {field: None for field in required_fields}
 
+    # For large documents, use the document sampling agent
+    document_size = len(combined_context)
+    max_tokens = 4000  # Maximum tokens for extraction
+
+    if document_size > max_tokens:
+        logger.info(f"Combined context is large ({document_size} chars), using document sampling")
+        try:
+            # Import the document sampling function
+            from agents.document_sampling_agent import get_document_samples
+
+            # Get representative samples from the document
+            sampled_content, coverage = await get_document_samples(ctx, combined_context, "Template Data", max_tokens)
+
+            # Use the sampled content for extraction
+            logger.info(f"Using sampled content for template data extraction. Coverage: {coverage:.2f}")
+            analysis_content = sampled_content
+
+            # Add sampling information to doc_analysis_info
+            doc_analysis_info += f"\n\nNote: Document has been sampled for analysis. Coverage: {coverage:.2f} of original content."
+        except Exception as sampling_error:
+            logger.error(f"Error sampling document: {sampling_error}", exc_info=True)
+            # Fall back to using the beginning of the document
+            logger.warning(f"Falling back to using first {max_tokens} chars of document")
+            analysis_content = combined_context[:max_tokens]
+    else:
+        # For small documents, use the full content
+        analysis_content = combined_context
+
     try:
         # Create a more sophisticated extraction agent with detailed instructions
         extraction_agent = Agent(
@@ -697,7 +927,7 @@ async def extract_data_for_template_agent_based(ctx: RunContextWrapper, context_
         # Create a more detailed prompt with the document content and analysis info
         prompt = f"""Here is the document content to analyze:
 
-        {combined_context[:4000]}  # Limit content length
+        {analysis_content}
 
         {doc_analysis_info if doc_analysis_info else ''}
 
@@ -862,22 +1092,32 @@ async def detect_required_fields_agent_based(template_content: str, template_nam
         logger.info("Falling back to regex-based field detection")
         return detect_required_fields_from_template(template_content, template_name)
 
+# --- Import the DocumentSamplingAgent ---
+try:
+    from agents.document_sampling_agent import sample_document
+    SAMPLING_AGENT_AVAILABLE = True
+except ImportError:
+    logger.warning("DocumentSamplingAgent not available. Large documents may not be processed efficiently.")
+    SAMPLING_AGENT_AVAILABLE = False
+
 # --- Define the DocumentAnalyzerAgent ---
 document_analyzer_agent = Agent(
     name="DocumentAnalyzerAgent",
     instructions="""You are a specialized document analyzer agent that understands document structure and extracts information using semantic understanding rather than pattern matching.
 
-You have four main capabilities:
+You have five main capabilities:
 1. Analyzing document structure to identify sections, layout, and document type
 2. Extracting specific fields from documents based on semantic understanding
 3. Detecting required fields from templates
 4. Analyzing documents for workflow integration with standardized output
+5. Intelligently sampling large documents to extract the most representative content
 
 When analyzing documents:
 - Focus on understanding the document's semantic structure, not just looking for patterns
 - Consider the document type when extracting information
 - Provide confidence scores for extracted values
 - Suggest alternative values when appropriate
+- For large documents, use intelligent sampling to focus on the most important content
 
 When detecting fields from templates:
 - Look for explicit placeholders in various formats
@@ -889,9 +1129,16 @@ Use the appropriate tool based on the task:
 - analyze_document_for_workflow: To analyze documents with standardized output for workflow integration
 - extract_fields_from_document: To extract specific fields
 - detect_fields_from_template: To identify fields in a template
+- sample_document: To intelligently sample large documents
 
 Always return structured data according to the tool's output format.
 """,
-    tools=[analyze_document_structure, analyze_document_for_workflow, extract_fields_from_document, detect_fields_from_template],
+    tools=[
+        analyze_document_structure,
+        analyze_document_for_workflow,
+        extract_fields_from_document,
+        detect_fields_from_template,
+        sample_document if SAMPLING_AGENT_AVAILABLE else None
+    ],
     model="gpt-4o-mini"  # Use appropriate model
 )
